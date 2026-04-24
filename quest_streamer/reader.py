@@ -65,22 +65,36 @@ _HAND_KEYS: Dict[str, Dict[str, str]] = {
         "trigger": "leftTrig",
         "grip": "leftGrip",
         "joystick": "leftJS",
-        "primary": "X",
-        "secondary": "Y",
-        "thumbstick": "LThU",
-        "js_press": "LJ",
+        # discrete buttons, per oculus_reader.buttons_parser
+        "primary": "X",          # X face button
+        "secondary": "Y",        # Y face button
+        "thumb_rest": "LThU",    # thumb touching the rest pad
+        "stick": "LJ",           # joystick clicked in
+        "grip_bool": "LG",       # digital grip (SDK-derived)
+        "trigger_bool": "LTr",   # digital trigger (SDK-derived)
     },
     "r": {
         "pose": "r",
         "trigger": "rightTrig",
         "grip": "rightGrip",
         "joystick": "rightJS",
-        "primary": "A",
-        "secondary": "B",
-        "thumbstick": "RThU",
-        "js_press": "RJ",
+        "primary": "A",          # A face button
+        "secondary": "B",        # B face button
+        "thumb_rest": "RThU",    # thumb touching the rest pad
+        "stick": "RJ",           # joystick clicked in
+        "grip_bool": "RG",       # digital grip
+        "trigger_bool": "RTr",   # digital trigger
     },
 }
+
+_BUTTON_NAMES: Tuple[str, ...] = (
+    "primary",
+    "secondary",
+    "thumb_rest",
+    "stick",
+    "grip_bool",
+    "trigger_bool",
+)
 
 
 def _scalar(value) -> float:
@@ -159,7 +173,7 @@ class QuestStreamer:
 
         discrete = {
             name: bool(frame.button_data.get(keys[name], False))
-            for name in ("primary", "secondary", "thumbstick", "js_press")
+            for name in _BUTTON_NAMES
         }
 
         return HandFrame(

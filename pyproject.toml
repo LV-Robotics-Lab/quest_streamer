@@ -1,0 +1,49 @@
+[project]
+name = "quest_streamer"
+version = "0.1.0"
+description = "Stream pose and button data from a Meta Quest / Oculus controller into Python."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Jingxiang" }]
+license = { text = "MIT" }
+keywords = ["quest", "oculus", "vr", "teleoperation", "robotics"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+viser = ["viser>=0.1"]
+
+[project.urls]
+Repository = "https://github.com/local/quest_streamer"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quest_streamer"]
+
+# ---------------------------------------------------------------------------
+# uv-specific settings
+#
+# `oculus_reader` is *not* declared as a dependency here because its GitHub
+# repository stores its companion APK via git-lfs. `uv sync` / `pip install`
+# do not invoke git-lfs, so the installed package ends up with a 132-byte
+# pointer file instead of the real APK and the `install_apk` step fails on
+# first use. Instead we provide `scripts/bootstrap_oculus_reader.sh` which
+# clones the repo, downloads the APK via GitHub's LFS media URL, and then
+# installs it into the active virtualenv with `uv pip install -e`.
+# ---------------------------------------------------------------------------
+
+[tool.uv]
+# Keep build isolation on by default; set to `false` only if debugging.
+
+[dependency-groups]
+dev = ["pytest>=7", "ruff>=0.5"]
