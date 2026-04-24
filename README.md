@@ -52,12 +52,15 @@ headset (different APKs), though only one is typically active at a time.
 quest_streamer/
 ├── pyproject.toml                   # project + uv config
 ├── uv.lock                          # pinned dep graph, reproducible installs
+├── assets/
+│   ├── oculus_teleop.apk            # controller-side companion app (vendored)
+│   └── hand_tracking_streamer.apk   # hand-tracking companion app (vendored)
 ├── quest_streamer/
 │   ├── __init__.py
 │   ├── reader.py                    # QuestStreamer, RawFrame, HandFrame
 │   ├── delta_tracker.py             # DeltaPoseTracker, TrackerStep
 │   ├── wrapper.py                   # QuestTeleop, TeleopSnapshot, HandState
-│   ├── hand_tracking.py             # HandTracker, HandTrackingSnapshot, TrackedHand
+│   ├── hand_tracking.py             # HandTracker, HandTrackingSnapshot, TrackedHand, TrackedHead
 │   ├── frames.py                    # X_WorldQuest / X_QuestWorld
 │   └── utils.py                     # precise_wait
 ├── examples/
@@ -77,8 +80,8 @@ quest_streamer/
 │   ├── ros2_hand_tracking_broadcaster.py  # ROS 2 TF + MarkerArray publisher
 │   └── quest_hand_tracking.rviz     # rviz2 config for hand-tracking
 └── scripts/
-    ├── bootstrap_oculus_reader.sh      # controller side: oculus_reader + APK
-    └── bootstrap_hand_tracking.sh      # hand-tracking side: SDK + APK
+    ├── bootstrap_oculus_reader.sh      # clones pinned oculus_reader, adb-installs assets/oculus_teleop.apk
+    └── bootstrap_hand_tracking.sh      # pip-installs hand-tracking-sdk, adb-installs assets/hand_tracking_streamer.apk
 ```
 
 ## Installation (uv-based, recommended)
@@ -108,21 +111,22 @@ uv sync --extra viser
 
 ### 3. Install `oculus_reader` into the venv
 
-`oculus_reader` is not on PyPI, and its GitHub repo ships the companion APK
-through git-lfs — neither `pip install git+...` nor `uv add` pulls LFS blobs,
-so the standard install leaves you with a 132-byte pointer file in place of
-the 7.3 MB APK and `OculusReader().install()` fails.
-
-A bootstrap script handles the dance:
+`oculus_reader` is not on PyPI, so a bootstrap script clones a pinned commit
+of the upstream repo and pip-installs it into the active venv. The
+companion APK is vendored in `assets/oculus_teleop.apk` so no LFS fetch is
+needed at install time:
 
 ```bash
 bash scripts/bootstrap_oculus_reader.sh
 ```
 
-It clones `rail-berkeley/oculus_reader` into `~/third_party/oculus_reader`,
-downloads the real APK via GitHub's LFS media URL, and installs the package
-into the active `.venv` with `uv pip install -e`. Override the checkout
-location with `QUEST_STREAMER_THIRD_PARTY=/your/path` if you prefer.
+Overrides:
+
+- `QUEST_STREAMER_THIRD_PARTY=/your/path` — where to clone the repo (default
+  `~/third_party`).
+- `OCULUS_READER_REV=<sha>` — pin a different upstream commit, or `HEAD` to
+  track upstream.
+- `SKIP_APK=1` — install only the Python package.
 
 ### 4. Set up the Quest side
 
@@ -145,14 +149,15 @@ On the headset:
 3. Confirm detection: `adb devices` should show the Quest's serial as
    `device`, not `unauthorized` or `no permissions`.
 
-### 5. Push the companion APK to the headset (once)
+### 5. Push the companion APK to the headset
+
+The bootstrap script already does this; to re-install manually:
 
 ```bash
-uv run python -c "from oculus_reader.reader import OculusReader; OculusReader(run=False).install()"
+adb install -r -g assets/oculus_teleop.apk
 ```
 
-You should see `APK installed successfully.` The Quest now runs
-`com.rail.oculus.teleop` whenever it is awake.
+The Quest now runs `com.rail.oculus.teleop` whenever it is awake.
 
 ### 6. Test it
 
@@ -178,9 +183,10 @@ socket rather than through `adb logcat`.
 bash scripts/bootstrap_hand_tracking.sh
 ```
 
-This `pip install`s `hand-tracking-sdk` into the active venv, clones
-`wengmister/hand-tracking-streamer`, and `adb install`s the APK onto the
-connected Quest. Set `SKIP_APK=1` to install the SDK only.
+This `pip install`s `hand-tracking-sdk` (from PyPI) into the active venv
+and `adb install`s the vendored APK (`assets/hand_tracking_streamer.apk`)
+onto the connected Quest. Set `SKIP_APK=1` to install the SDK only, or
+override `HAND_TRACKING_SDK_VERSION` to pin a different SDK release.
 
 `hand-tracking-sdk` requires Python ≥3.12, which is why it is installed via
 this bootstrap script rather than declared in `pyproject.toml` (that would

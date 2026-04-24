@@ -1,42 +1,46 @@
 #!/usr/bin/env bash
-# Bootstrap `oculus_reader` into the active virtualenv.
-#
-# This is a workaround for the fact that `oculus_reader` is not on PyPI and
-# its GitHub repo ships the companion APK via git-lfs - neither `uv add
-# git+...` nor `pip install git+...` fetches LFS blobs, so the installed
-# package ends up with a 132-byte pointer file where the APK should be.
-#
-# This script:
-#   1. clones the repo (without LFS smudging) into $THIRD_PARTY_DIR
-#   2. downloads the real APK via GitHub's LFS media URL
-#   3. installs the package into the active venv via `uv pip install -e`
+# Bootstrap the controller-side pipeline:
+#   1. Clone the `oculus_reader` Python package from GitHub into
+#      $QUEST_STREAMER_THIRD_PARTY and pip-install it into the active venv.
+#      The package is not on PyPI, so we consume it from source.
+#   2. adb-install the companion APK from ./assets/oculus_teleop.apk onto
+#      the connected Quest. The APK is vendored in-repo so nothing has to
+#      fetch LFS blobs at install time.
 #
 # Usage:
-#       cd quest_streamer
-#       uv sync                                 # creates .venv
-#       bash scripts/bootstrap_oculus_reader.sh # fills it in
+#     uv sync                                       # create .venv
+#     bash scripts/bootstrap_oculus_reader.sh       # install
 #
-# Override the install location with QUEST_STREAMER_THIRD_PARTY=/some/path
-# if you'd rather not have the checkout under $HOME/third_party.
+# Overrides:
+#     QUEST_STREAMER_THIRD_PARTY=/path              # where to clone the repo
+#     OCULUS_READER_REV=<rev|HEAD>                  # upstream git revision
+#     SKIP_APK=1                                    # Python package only
+#
+# The upstream commit is pinned below for reproducibility; bump when needed.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$REPO_ROOT"
 
 THIRD_PARTY_DIR="${QUEST_STREAMER_THIRD_PARTY:-$HOME/third_party}"
 REPO_DIR="$THIRD_PARTY_DIR/oculus_reader"
 REPO_URL="https://github.com/rail-berkeley/oculus_reader.git"
-APK_MEDIA_URL="https://media.githubusercontent.com/media/rail-berkeley/oculus_reader/main/oculus_reader/APK/teleop-debug.apk"
-APK_REL_PATH="oculus_reader/APK/teleop-debug.apk"
+OCULUS_READER_REV="${OCULUS_READER_REV:-17bc7b3923f5754d70c4e358867a3bcac1a3c0c3}"
 
-echo "[1/4] Ensuring checkout directory exists: $THIRD_PARTY_DIR"
+APK_PATH="$REPO_ROOT/assets/oculus_teleop.apk"
+
+echo "[1/3] Ensuring oculus_reader checkout at $REPO_DIR"
 mkdir -p "$THIRD_PARTY_DIR"
-
 if [ ! -d "$REPO_DIR/.git" ]; then
-    echo "[2/4] Cloning $REPO_URL into $REPO_DIR (LFS smudge disabled)"
+    # Skip LFS entirely — we vendor the APK ourselves; the clone only needs
+    # the Python source. This avoids the need for git-lfs to be installed.
     GIT_LFS_SKIP_SMUDGE=1 git clone "$REPO_URL" "$REPO_DIR" || {
-        echo "Initial clone failed (likely because git-lfs is not installed)."
-        echo "Retrying with LFS filter forced to a no-op..."
+        echo "Initial clone failed (likely because git-lfs is not installed). Retrying without LFS filters..."
         (
-            cd "$REPO_DIR" 2>/dev/null || git clone --no-checkout "$REPO_URL" "$REPO_DIR"
+            rm -rf "$REPO_DIR"
+            git clone --no-checkout "$REPO_URL" "$REPO_DIR"
             cd "$REPO_DIR"
             git config --local filter.lfs.smudge 'cat'
             git config --local filter.lfs.process ''
@@ -44,42 +48,52 @@ if [ ! -d "$REPO_DIR/.git" ]; then
             git restore --source=HEAD :/
         )
     }
-else
-    echo "[2/4] Using existing checkout at $REPO_DIR"
 fi
 
-APK_PATH="$REPO_DIR/$APK_REL_PATH"
-
-is_lfs_pointer=false
-if [ -f "$APK_PATH" ]; then
-    if head -c 64 "$APK_PATH" | grep -q "git-lfs.github.com/spec"; then
-        is_lfs_pointer=true
-    fi
+if [ "$OCULUS_READER_REV" != "HEAD" ]; then
+    (
+        cd "$REPO_DIR"
+        current=$(git rev-parse HEAD 2>/dev/null || echo "")
+        if [ "$current" != "$OCULUS_READER_REV" ]; then
+            echo "      Pinning to ${OCULUS_READER_REV:0:10}"
+            git fetch --depth 1 origin "$OCULUS_READER_REV" 2>/dev/null || git fetch origin
+            git -c advice.detachedHead=false checkout "$OCULUS_READER_REV"
+        fi
+    )
 fi
 
-if $is_lfs_pointer || [ ! -f "$APK_PATH" ] || [ $(stat -c '%s' "$APK_PATH") -lt 100000 ]; then
-    echo "[3/4] APK missing or is an LFS pointer, downloading from $APK_MEDIA_URL"
-    mkdir -p "$(dirname "$APK_PATH")"
-    curl -fL --retry 3 -o "$APK_PATH" "$APK_MEDIA_URL"
-    apk_size=$(stat -c '%s' "$APK_PATH")
-    if [ "$apk_size" -lt 100000 ]; then
-        echo "ERROR: downloaded APK is only $apk_size bytes; aborting" >&2
-        exit 1
-    fi
-    echo "      Downloaded $apk_size bytes to $APK_PATH"
-else
-    echo "[3/4] APK already present at $APK_PATH ($(stat -c '%s' "$APK_PATH") bytes)"
-fi
-
-echo "[4/4] Installing oculus_reader into active venv"
+echo "[2/3] Installing oculus_reader into active venv"
 if ! command -v uv >/dev/null 2>&1; then
-    echo "ERROR: uv not on PATH. Did you activate the env?" >&2
+    echo "ERROR: uv not on PATH." >&2
     exit 1
 fi
 uv pip install -e "$REPO_DIR"
 
+if [ "${SKIP_APK:-0}" = "1" ]; then
+    echo "[3/3] SKIP_APK=1, skipping APK install."
+    echo "Done (Python only)."
+    exit 0
+fi
+
+if [ ! -f "$APK_PATH" ] || [ "$(stat -c '%s' "$APK_PATH")" -lt 100000 ]; then
+    echo "ERROR: $APK_PATH is missing or too small; was it checked out?" >&2
+    exit 1
+fi
+
+if ! command -v adb >/dev/null 2>&1; then
+    echo "WARNING: adb not on PATH; cannot install APK. Run 'sudo apt install -y adb' and retry, or pass SKIP_APK=1." >&2
+    exit 1
+fi
+
+if ! adb devices | awk 'NR>1 && $2=="device"' | grep -q .; then
+    echo "ERROR: no Quest authorized via adb. Plug in USB + accept the prompt." >&2
+    exit 1
+fi
+
+echo "[3/3] Installing APK on connected Quest ($(du -h "$APK_PATH" | cut -f1))"
+adb install -r -g "$APK_PATH"
+
 echo ""
-echo "Done. oculus_reader + pure-python-adb are available in the active venv."
-echo "Next: plug in the Quest, accept the USB-debug prompt, then run:"
-echo "    uv run python -c \"from oculus_reader.reader import OculusReader; OculusReader(run=False).install()\""
-echo "to push the companion APK to the headset."
+echo "Done."
+echo "Next: plug in the Quest, put it on, and run"
+echo "    uv run python examples/print_raw_data.py"
