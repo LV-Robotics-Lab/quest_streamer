@@ -92,6 +92,13 @@ class TrackedHand:
     `hand_tracking_sdk.STREAMED_JOINT_NAMES` (wrist first, then 4 joints per
     finger in the order thumb/index/middle/ring/little).
 
+    Note on landmark frames: the upstream stream reports landmark points in
+    the **wrist-local** frame (the first point is the wrist itself at
+    `(0, 0, 0)`). `landmarks` keeps that convention — still wrist-local, just
+    stacked into a numpy array. `landmarks_world` is pre-multiplied by the
+    wrist pose so every joint is expressed in the same Z-up FLU world frame
+    as `wrist_world[:3, 3]`, i.e. `landmarks_world[0] == wrist_world[:3, 3]`.
+
     `connected` is `True` once at least one frame has been assembled for this
     hand. All fields are `None` when `connected=False`.
     """
@@ -110,11 +117,30 @@ class TrackedHand:
 
 
 @dataclass
+class TrackedHead:
+    """HMD pose snapshot (optional stream from the hand-tracking APK)."""
+
+    connected: bool = False
+    pose: Optional[np.ndarray] = None         # 4x4 in Unity-LH
+    pose_world: Optional[np.ndarray] = None   # 4x4 in Z-up FLU
+    sequence_id: int = 0
+    recv_ts_ns: int = 0
+    source_ts_ns: Optional[int] = None
+    source_frame_seq: Optional[int] = None
+    timestamp: float = 0.0
+
+
+@dataclass
 class HandTrackingSnapshot:
-    """Dual-hand hand-tracking snapshot plus loop metadata."""
+    """Dual-hand hand-tracking snapshot plus loop metadata.
+
+    `head` is populated when the APK is configured to also stream HMD pose;
+    otherwise `head.connected` stays `False`.
+    """
 
     l: TrackedHand
     r: TrackedHand
+    head: TrackedHead
     tick: int
     fps: float
     timestamp: float
@@ -178,9 +204,12 @@ class HandTracker:
             ) from e
 
         # Stash imports for the background loop.
+        from hand_tracking_sdk.frame import HandFrame, HeadFrame
+        from hand_tracking_sdk.models import HandSide
         self._sdk_types = {
-            "HandFrame": __import__("hand_tracking_sdk.frame", fromlist=["HandFrame"]).HandFrame,
-            "HandSide": __import__("hand_tracking_sdk.models", fromlist=["HandSide"]).HandSide,
+            "HandFrame": HandFrame,
+            "HeadFrame": HeadFrame,
+            "HandSide": HandSide,
         }
 
         config = HTSClientConfig(
@@ -199,6 +228,7 @@ class HandTracker:
         self._lock = threading.Lock()
         self._latest_l = TrackedHand(side="l")
         self._latest_r = TrackedHand(side="r")
+        self._latest_head = TrackedHead()
         self._tick = 0
         self._fps_window: List[float] = []
 
@@ -273,39 +303,51 @@ class HandTracker:
         with self._lock:
             l = self._copy_hand(self._latest_l)
             r = self._copy_hand(self._latest_r)
+            head = self._copy_head(self._latest_head)
             now = time.monotonic()
             cutoff = now - 1.0
             while self._fps_window and self._fps_window[0] < cutoff:
                 self._fps_window.pop(0)
             fps = float(len(self._fps_window))
             return HandTrackingSnapshot(
-                l=l, r=r, tick=self._tick, fps=fps, timestamp=now,
+                l=l, r=r, head=head, tick=self._tick, fps=fps, timestamp=now,
             )
 
     # ------------------------------------------------------------ the loop
 
     def _run_loop(self) -> None:
         HandFrame = self._sdk_types["HandFrame"]
+        HeadFrame = self._sdk_types["HeadFrame"]
         try:
             for event in self._client.iter_events():
                 if self._stop_event.is_set():
                     return
-                if not isinstance(event, HandFrame):
-                    continue
-                self._consume_frame(event)
+                if isinstance(event, HandFrame):
+                    self._consume_hand_frame(event)
+                elif isinstance(event, HeadFrame):
+                    self._consume_head_frame(event)
         except Exception as e:  # pragma: no cover - integration path
             self._last_error = e
             traceback.print_exc()
 
-    def _consume_frame(self, frame) -> None:
+    def _consume_hand_frame(self, frame) -> None:
         HandSide = self._sdk_types["HandSide"]
 
         wrist_unity = _wrist_pose_to_matrix(frame.wrist)
         wrist_world = X_WorldUnity @ wrist_unity @ X_UnityWorld
 
-        landmarks_unity = _landmarks_to_array(frame.landmarks)
-        # transform points: p_world = BASIS @ p_unity
-        landmarks_world = (_BASIS_UNITY_LEFT_TO_FLU @ landmarks_unity.T).T
+        # Landmarks arrive in **wrist-local** Unity coords. The first point is
+        # the wrist itself at (0, 0, 0). To produce world-space positions
+        # usable for visualization / ROS TFs we first push them through the
+        # wrist pose (still in Unity world), then rotate the whole set into
+        # FLU:
+        #     p_world = BASIS_UNITY_LEFT_TO_FLU @ (R_wrist_unity @ p_local + t_wrist_unity)
+        landmarks_local_unity = _landmarks_to_array(frame.landmarks)
+        landmarks_in_unity_world = (
+            (wrist_unity[:3, :3] @ landmarks_local_unity.T).T
+            + wrist_unity[:3, 3]
+        )
+        landmarks_world = (_BASIS_UNITY_LEFT_TO_FLU @ landmarks_in_unity_world.T).T
 
         now = time.monotonic()
         hand = TrackedHand(
@@ -313,7 +355,7 @@ class HandTracker:
             connected=True,
             wrist=wrist_unity,
             wrist_world=wrist_world,
-            landmarks=landmarks_unity,
+            landmarks=landmarks_local_unity,
             landmarks_world=landmarks_world,
             sequence_id=int(frame.sequence_id),
             recv_ts_ns=int(frame.recv_ts_ns),
@@ -322,11 +364,40 @@ class HandTracker:
             timestamp=now,
         )
 
+        self._publish(hand=hand, head=None)
+
+    def _consume_head_frame(self, frame) -> None:
+        # HeadPose shares the same field layout as WristPose.
+        pose_unity = _wrist_pose_to_matrix(frame.head)
+        pose_world = X_WorldUnity @ pose_unity @ X_UnityWorld
+        now = time.monotonic()
+        head = TrackedHead(
+            connected=True,
+            pose=pose_unity,
+            pose_world=pose_world,
+            sequence_id=int(frame.sequence_id),
+            recv_ts_ns=int(frame.recv_ts_ns),
+            source_ts_ns=frame.source_ts_ns,
+            source_frame_seq=frame.source_frame_seq,
+            timestamp=now,
+        )
+        self._publish(hand=None, head=head)
+
+    def _publish(
+        self,
+        hand: Optional[TrackedHand],
+        head: Optional[TrackedHead],
+    ) -> None:
+        now = time.monotonic()
         with self._lock:
-            if hand.side == "l":
-                self._latest_l = hand
-            else:
-                self._latest_r = hand
+            if hand is not None:
+                if hand.side == "l":
+                    self._latest_l = hand
+                else:
+                    self._latest_r = hand
+            if head is not None:
+                self._latest_head = head
+
             self._tick += 1
             self._fps_window.append(now)
 
@@ -337,6 +408,7 @@ class HandTracker:
             snap = HandTrackingSnapshot(
                 l=self._copy_hand(self._latest_l),
                 r=self._copy_hand(self._latest_r),
+                head=self._copy_head(self._latest_head),
                 tick=self._tick,
                 fps=float(len(self._fps_window)),
                 timestamp=now,
@@ -359,6 +431,19 @@ class HandTracker:
             wrist_world=None if h.wrist_world is None else h.wrist_world.copy(),
             landmarks=None if h.landmarks is None else h.landmarks.copy(),
             landmarks_world=None if h.landmarks_world is None else h.landmarks_world.copy(),
+            sequence_id=h.sequence_id,
+            recv_ts_ns=h.recv_ts_ns,
+            source_ts_ns=h.source_ts_ns,
+            source_frame_seq=h.source_frame_seq,
+            timestamp=h.timestamp,
+        )
+
+    @staticmethod
+    def _copy_head(h: TrackedHead) -> TrackedHead:
+        return TrackedHead(
+            connected=h.connected,
+            pose=None if h.pose is None else h.pose.copy(),
+            pose_world=None if h.pose_world is None else h.pose_world.copy(),
             sequence_id=h.sequence_id,
             recv_ts_ns=h.recv_ts_ns,
             source_ts_ns=h.source_ts_ns,

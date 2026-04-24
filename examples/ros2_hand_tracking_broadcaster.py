@@ -180,6 +180,12 @@ class HandTrackingBroadcaster(Node):
             if markers.markers:
                 self.marker_pubs[hand.side].publish(markers)
 
+        # Optional head pose — published if the APK is configured to send it.
+        if snap.head.connected and snap.head.pose_world is not None:
+            tfs.append(_to_transform(
+                snap.head.pose_world, self.world_frame, "quest_head", now,
+            ))
+
         if tfs:
             self.tf_br.sendTransform(tfs)
 

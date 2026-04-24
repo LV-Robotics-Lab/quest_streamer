@@ -114,6 +114,7 @@ def main() -> None:
     gui_fps = server.gui.add_markdown("**FPS**: —")
     gui_l = server.gui.add_markdown("**left** — waiting")
     gui_r = server.gui.add_markdown("**right** — waiting")
+    gui_head = server.gui.add_markdown("**head** — waiting")
 
     ht = HandTracker(
         transport=args.transport,
@@ -143,6 +144,29 @@ def main() -> None:
                     )
                 else:
                     gui.content = f"**{hand.side}** — waiting"
+
+            # Head pose (shown as a larger frame + green sphere).
+            if snap.head.connected and snap.head.pose_world is not None:
+                h_pos, h_wxyz = _pose_to_wxyz_pos(snap.head.pose_world)
+                server.scene.add_frame(
+                    "quest/head",
+                    position=h_pos, wxyz=h_wxyz,
+                    axes_length=0.10, axes_radius=0.006,
+                )
+                server.scene.add_icosphere(
+                    "quest/head/marker",
+                    radius=0.06,
+                    color=(100, 200, 100),
+                    position=tuple(h_pos),
+                    wxyz=h_wxyz,
+                )
+                gui_head.content = (
+                    f"**head** — connected\n\n"
+                    f"- pos: `[{h_pos[0]:+.3f}, {h_pos[1]:+.3f}, {h_pos[2]:+.3f}]` m\n"
+                    f"- seq: `{snap.head.sequence_id}`"
+                )
+            else:
+                gui_head.content = "**head** — not streaming (toggle Head Pose in the APK menu)"
 
             elapsed = time.monotonic() - t_start
             if elapsed < dt:

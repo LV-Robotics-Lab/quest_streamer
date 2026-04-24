@@ -25,6 +25,7 @@ from quest_streamer.hand_tracking import (
     HandTracker,
     HandTrackingSnapshot,
     TrackedHand,
+    TrackedHead,
     X_WorldUnity,
     X_UnityWorld,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "HandTracker",
     "HandTrackingSnapshot",
     "TrackedHand",
+    "TrackedHead",
     "X_WorldUnity",
     "X_UnityWorld",
     # Shared helpers
