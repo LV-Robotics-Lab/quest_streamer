@@ -281,7 +281,70 @@ uv run python examples/camera_preview.py
 
 On the headset, launch `quest_camera_streamer`, tap **Start streaming**.
 Both 1280×960 eye previews appear in-app and on the PC-side OpenCV window.
-About 37 FPS combined over USB.
+About 37 FPS combined over USB (~18 FPS per eye).
+
+Gotchas, all hit during testing:
+
+- **HMD dismount pauses the camera.** Horizon OS revokes camera access when
+  the headset is off the user's head; you'll see `Camera 50 error: disabled`
+  in logcat. The TCP server keeps listening but no new frames arrive, so
+  `wait_for_ready` blocks. Put the headset back on and press **Stop → Start**
+  in the app to reopen the cameras.
+- **Use `adb forward`, not `adb reverse`.** The APK is the TCP *server*; PC
+  is the client. (`adb reverse` is what the hand-tracking pipeline uses,
+  because there the APK is the client.)
+- **Restart streaming after reinstalling the APK.** Newer APK → new process
+  → old bound socket lingers in TIME_WAIT for a few seconds; first Start
+  after install may EADDRINUSE. Second Start works.
+
+### 4. ROS 2 publishing (optional)
+
+Prerequisite: install `opencv-python` and ensure scipy/numpy are compatible
+in the ROS 2 venv (the default `scipy` from Noble's `--system-site-packages`
+is bound to numpy<2; pull newer ones into the venv):
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source .venv-ros2/bin/activate
+pip install -U "scipy>=1.13" "numpy<3" opencv-python
+```
+
+Run the publisher:
+
+```bash
+# Terminal 1
+adb forward tcp:9100 tcp:9100   # (if not already set)
+python examples/ros2_camera_publisher.py
+
+# Terminal 2
+source /opt/ros/jazzy/setup.bash
+ros2 topic list | grep quest
+# /quest/camera/l/camera_info
+# /quest/camera/l/image_raw
+# /quest/camera/l/image_raw/compressed
+# /quest/camera/r/camera_info
+# /quest/camera/r/image_raw
+# /quest/camera/r/image_raw/compressed
+
+ros2 topic hz /quest/camera/l/image_raw      # ~17 Hz, matching publisher
+```
+
+Visualize one eye at a time with `rqt_image_view` (Python 3.12 ABI, so launch
+through the ROS 2 venv):
+
+```bash
+# Make the venv's python3.12 win over any conda python3.13 on PATH:
+export PATH="$PWD/.venv-ros2/bin:$PATH"
+ros2 run rqt_image_view rqt_image_view /quest/camera/l/image_raw
+```
+
+The dropdown in the window switches between `/quest/camera/l/image_raw` and
+`/quest/camera/r/image_raw`. To see both simultaneously, open two instances.
+
+Topic rates observed end-to-end: each eye publishes at ~16–17 Hz on both the
+raw and compressed topics; underlying MJPEG stream is ~18 FPS per eye. Add
+`--no-raw` to the publisher if you only need `/image_raw/compressed` (saves
+~7 MB/s/eye of bus traffic).
 
 ## Quick start
 
