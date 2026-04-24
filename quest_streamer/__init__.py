@@ -29,6 +29,7 @@ from quest_streamer.hand_tracking import (
     X_WorldUnity,
     X_UnityWorld,
 )
+from quest_streamer.camera import CameraStreamer, CameraFrame, CameraSnapshot
 from quest_streamer.utils import precise_wait
 
 __all__ = [
@@ -50,6 +51,10 @@ __all__ = [
     "TrackedHead",
     "X_WorldUnity",
     "X_UnityWorld",
+    # Passthrough-camera API
+    "CameraStreamer",
+    "CameraFrame",
+    "CameraSnapshot",
     # Shared helpers
     "precise_wait",
 ]

@@ -4,15 +4,17 @@
 (pose + buttons) and **bare-hand** data (21 finger joint positions per hand)
 from a Meta Quest headset, via two complementary Android-side APKs.
 
-## Two modes
+## Three modes
 
-| Mode | What it gives you | Upstream APK | Upstream Python |
+| Mode | What it gives you | Android side | PC-side Python |
 |---|---|---|---|
-| **Controller** | 6-DoF pose of each Touch controller, trigger/grip/joystick, 6 discrete buttons per hand | `rail-berkeley/oculus_reader` | `oculus_reader` (ADB logcat) |
-| **Hand-tracking** | 6-DoF wrist pose + 21 finger-joint positions per bare hand | `wengmister/hand-tracking-streamer` | `hand-tracking-sdk` (TCP/UDP socket) |
+| **Controller** | 6-DoF pose of each Touch controller, trigger/grip/joystick, 6 discrete buttons per hand | `rail-berkeley/oculus_reader` APK | `oculus_reader` (ADB logcat) |
+| **Hand-tracking** | 6-DoF wrist pose + 21 finger-joint positions per bare hand | `wengmister/hand-tracking-streamer` APK | `hand-tracking-sdk` (TCP/UDP socket) |
+| **Passthrough camera** | MJPEG stream from both forward RGB passthrough cameras (1280×960 per eye, ~37 Hz combined) | `android/quest_camera_streamer/` (in-repo, native Kotlin) | `CameraStreamer` (TCP socket) |
 
-The two modes are fully independent and can be used side by side on the same
-headset (different APKs), though only one is typically active at a time.
+Each mode is independent. On Quest, only one VR application runs at a time,
+so the controller / hand-tracking / camera APKs are typically used one at a
+time. The PC-side wrappers can coexist freely in the same Python process.
 
 ## What you get
 
@@ -38,6 +40,15 @@ headset (different APKs), though only one is typically active at a time.
   wrist pose and 21 joint positions, in both native Unity-LH and Z-up FLU
   world frames.
 
+### Passthrough-camera mode
+
+- **`CameraStreamer` — high-level wrapper.** Consumes the MJPEG TCP stream
+  from `quest_camera_streamer` (a small in-repo Kotlin app under
+  `android/quest_camera_streamer/`). Exposes the same `snapshot()` /
+  `on_update()` / `wait_for_ready()` surface, with per-eye
+  `CameraFrame` objects carrying decoded BGR `np.ndarray` + raw JPEG bytes.
+  Wired for `adb forward tcp:9100 tcp:9100` over USB by default.
+
 ### Shared
 
 - `X_WorldQuest` / `X_QuestWorld` — transform between the Quest's controller
@@ -55,12 +66,16 @@ quest_streamer/
 ├── assets/
 │   ├── oculus_teleop.apk            # controller-side companion app (vendored)
 │   └── hand_tracking_streamer.apk   # hand-tracking companion app (vendored)
+├── android/
+│   └── quest_camera_streamer/       # Kotlin source for the passthrough-camera APK
+│                                    # Build with ./gradlew assembleDebug
 ├── quest_streamer/
 │   ├── __init__.py
 │   ├── reader.py                    # QuestStreamer, RawFrame, HandFrame
 │   ├── delta_tracker.py             # DeltaPoseTracker, TrackerStep
 │   ├── wrapper.py                   # QuestTeleop, TeleopSnapshot, HandState
 │   ├── hand_tracking.py             # HandTracker, HandTrackingSnapshot, TrackedHand, TrackedHead
+│   ├── camera.py                    # CameraStreamer, CameraFrame, CameraSnapshot
 │   ├── frames.py                    # X_WorldQuest / X_QuestWorld
 │   └── utils.py                     # precise_wait
 ├── examples/
@@ -73,6 +88,10 @@ quest_streamer/
 │   ├── visualize_wrapper_viser.py   # viser viz of QuestTeleop
 │   ├── ros2_tf_broadcaster.py       # ROS 2 TF broadcaster for controllers
 │   ├── quest_viz.rviz               # rviz2 config for controller TFs
+│   │
+│   # -- passthrough camera mode --
+│   ├── camera_preview.py            # OpenCV window showing L+R live preview
+│   ├── ros2_camera_publisher.py     # sensor_msgs/Image + CompressedImage publisher
 │   │
 │   # -- hand-tracking mode --
 │   ├── hand_tracking_print.py       # text printout per hand per ~0.5s
@@ -214,6 +233,56 @@ uv run python examples/hand_tracking_viser.py        # browser viz
 With the headset on and both hands visible in front of you, you should see
 live wrist poses + 21 joint positions per hand stream in.
 
+## Installation — passthrough camera mode
+
+The camera streamer is an in-repo Kotlin app. Build + install require a JDK
+and the Android SDK command-line tools; **no Android Studio**.
+
+### 1. One-time toolchain
+
+```bash
+sudo apt install -y openjdk-17-jdk
+
+# Android SDK cmdline-tools (~150 MB download; ~1 GB after sdkmanager install)
+mkdir -p ~/Android/cmdline-tools
+cd /tmp && curl -fLsS -o cmdtools.zip \
+    https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip -q cmdtools.zip
+mv cmdline-tools ~/Android/cmdline-tools/latest
+
+export ANDROID_HOME=$HOME/Android
+export PATH="$HOME/Android/cmdline-tools/latest/bin:$PATH"
+yes | sdkmanager --licenses
+sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+```
+
+### 2. Build + install the APK
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export ANDROID_HOME=$HOME/Android
+cd android/quest_camera_streamer
+echo "sdk.dir=$ANDROID_HOME" > local.properties
+./gradlew assembleDebug
+adb install -r -g app/build/outputs/apk/debug/app-debug.apk
+```
+
+Produces `com.oculus.camerademo` on the headset (same applicationId as the
+streamer APK; it displaces the Meta sample). The Kotlin source is under
+`android/quest_camera_streamer/app/src/main/java/com/oculus/camerademo/`.
+
+### 3. Wire + test
+
+```bash
+adb forward tcp:9100 tcp:9100
+uv pip install opencv-python    # one-time
+uv run python examples/camera_preview.py
+```
+
+On the headset, launch `quest_camera_streamer`, tap **Start streaming**.
+Both 1280×960 eye previews appear in-app and on the PC-side OpenCV window.
+About 37 FPS combined over USB.
+
 ## Quick start
 
 ### Recommended: the high-level wrapper
@@ -321,6 +390,38 @@ Transport options match the upstream SDK: `"tcp_server"` (PC listens; pairs
 with `adb reverse tcp:8000 tcp:8000` for USB), `"tcp_client"` (PC connects
 out, matches APK's TCP-client mode), `"udp"` (low-setup WiFi broadcast).
 
+### Passthrough-camera quick start
+
+```python
+from quest_streamer import CameraStreamer
+
+with CameraStreamer(host="127.0.0.1", port=9100) as cam:
+    cam.wait_for_ready(timeout=10.0)
+
+    while True:
+        snap = cam.snapshot()
+        if snap.l.connected:
+            left_bgr = snap.l.frame             # (960, 1280, 3) uint8
+            left_jpeg = snap.l.jpeg_bytes        # raw JPEG bytes
+        if snap.r.connected:
+            right_bgr = snap.r.frame
+```
+
+`CameraFrame` fields: `side`, `connected`, `frame` (BGR `np.ndarray`),
+`jpeg_bytes` (raw), `width`, `height`, `sequence_id`, `recv_ts`.
+
+Pass `decode=False` to skip OpenCV decoding (saves CPU when you only want
+the JPEG bytes to forward somewhere else).
+
+Wire setup on the PC:
+
+```bash
+adb forward tcp:9100 tcp:9100
+```
+
+then on the headset open the `quest_camera_streamer` app and tap **Start
+streaming**.
+
 ## Complete reference: what the wrapper exposes
 
 Everything below was verified on a physical Meta Quest 3S with real Touch
@@ -393,17 +494,6 @@ physical button in that hand.
 | `just_released` | `bool` | falling edge — same semantics |
 | `timestamp` | `float` | `time.monotonic()` when this `HandState` was sampled |
 
-### Not available from this pipeline
-
-The following exist on the hardware but are not forwarded by the
-`com.rail.oculus.teleop` APK, so `quest_streamer` cannot surface them:
-
-- Menu / Oculus / Home system buttons.
-- Headset (HMD) pose — only controllers are tracked.
-- Finger-joint / hand-tracking data.
-- Haptic feedback. The pipeline is read-only; there is no way to make the
-  controllers vibrate from Python without replacing the Android-side app.
-
 ### World / Quest frame convention
 
 `QuestStreamer.read_hand(..., in_world_frame=False)` returns poses exactly as
@@ -416,58 +506,8 @@ from quest_streamer import X_QuestWorld, X_WorldQuest
 X_world = X_QuestWorld @ X_quest @ X_WorldQuest
 ```
 
-## Mapping back to rwVR
+## Head-pose stability
 
-| `quest_streamer` symbol                         | rwVR location                                                    |
-|-------------------------------------------------|------------------------------------------------------------------|
-| `QuestStreamer.read_hand()`                     | inline `OculusReader().get_transformations_and_buttons()` calls  |
-| `DeltaPoseTracker.step()`                       | `SingleArmQuestAgent.act()` in `rel/teleop/quest_to_arm.py`      |
-| `X_WorldQuest` / `X_QuestWorld`                 | top of `rel/teleop/quest_to_arm.py`                              |
-| `precise_wait`                                  | `rel/utils/teleop_utils.py`                                      |
-
-## Not included on purpose
-
-The rwVR repo also contained robot-specific glue (`XArmQuestAgent`,
-`teleop_data_collection.py`, point-cloud capture, calibration). Those are
-outside the scope of "Quest information acquisition" and are intentionally
-left in rwVR. If you want a full teleop loop, import `quest_streamer` from
-your own integration script and combine it with your robot / camera stack.
-
-## Known limitations
-
-### Head-pose stability
-
-Head, wrist, and landmark poses all come from the Quest's onboard
-Visual-Inertial Odometry (VIO, "Insight" tracking). Typical behavior:
-
-- **Single session, stationary user**: mm-level position noise, sub-degree
-  rotation noise.
-- **Single session, user walking**: mm – cm drift per minute depending on
-  lighting, scene texture, and how fast you move.
-- **Across sessions**: the tracking-space origin is re-anchored at each
-  boot / recenter. The `pose_world` origin is **not consistent across
-  restarts** of the headset or the companion app.
-- **Failure modes**: uniform white walls, dark rooms, heavy glare, or
-  motion faster than the cameras can track will cause pose to drift or
-  freeze. The APK keeps streaming the last pose while tracking is lost.
-
-For single-session teleop or a few minutes of demo capture this is usually
-fine. If you need **absolute, cross-session-stable world coordinates** or
-**sub-cm long-term drift correction**, two directions worth investigating:
-
-1. **PC-side AprilTag fusion.** The `hand-tracking-streamer` APK already
-   bundles a WebRTC video sender for the Quest passthrough cameras. You can
-   run an AprilTag detector on the PC, recover a known-tag world pose, and
-   fuse it with the streamed VIO pose to cancel drift. This keeps the rest
-   of the pipeline (hand joints etc.) unchanged.
-
-2. **Use `QuestNav` as a drop-in for head-only pose.** [QuestNav](https://questnav.gg/)
-   is a standalone Unity app that already does AprilTag + VIO fusion, with
-   sub-cm accuracy in FRC setups. Tradeoff: it replaces the
-   hand-tracking-streamer APK entirely (Quest runs one VR app at a time),
-   so you lose finger-joint tracking, and its output is NetworkTables 4
-   rather than a socket CSV — integrating it here would mean a third reader
-   implementation.
-
-We do neither today. If you hit one of the limitations above and want help
-adding a workaround, bring it up as an issue.
+If the head pose drifts unacceptably for your use case, consider swapping
+in [QuestNav](https://github.com/QuestNav/QuestNav), which fuses AprilTags
+with VIO for sub-cm, cross-session-stable head pose.
