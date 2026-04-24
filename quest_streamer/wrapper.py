@@ -100,7 +100,23 @@ class QuestTeleop:
         streamer: Optional[QuestStreamer] = None,
         on_update: Optional[StateCallback] = None,
         start_now: bool = True,
+        ip_address: Optional[str] = None,
+        port: int = 5555,
     ) -> None:
+        """Create the teleop wrapper.
+
+        Args:
+            frequency: bg-loop rate in Hz.
+            translation_scaling: per-hand scale factor for delta translation.
+            trigger_threshold: trigger value above which a hand is "engaged".
+            streamer: pre-built `QuestStreamer`. If given, `ip_address`/`port`
+                are ignored (the caller already configured the transport).
+            on_update: optional callback invoked every tick.
+            start_now: start the bg thread in `__init__`.
+            ip_address: if set and `streamer is None`, switch the internally
+                created streamer to network mode using this Quest IP.
+            port: adb TCP port for network mode. Defaults to 5555.
+        """
         if frequency <= 0:
             raise ValueError(f"frequency must be > 0, got {frequency}")
 
@@ -114,7 +130,10 @@ class QuestTeleop:
         self._scaling = scaling
 
         self._owned_streamer = streamer is None
-        self._streamer = streamer if streamer is not None else QuestStreamer()
+        if streamer is not None:
+            self._streamer = streamer
+        else:
+            self._streamer = QuestStreamer(ip_address=ip_address, port=port)
 
         self._trackers: Dict[str, DeltaPoseTracker] = {
             hand: DeltaPoseTracker(

@@ -119,7 +119,26 @@ def _pair(value) -> Tuple[float, float]:
 class QuestStreamer:
     """Stream pose + button data from a Meta Quest / Oculus controller."""
 
-    def __init__(self, print_fps: bool = False, run_oculus_reader: bool = True):
+    def __init__(
+        self,
+        print_fps: bool = False,
+        run_oculus_reader: bool = True,
+        ip_address: Optional[str] = None,
+        port: int = 5555,
+    ):
+        """Create a streamer.
+
+        Args:
+            print_fps: forward OculusReader's own FPS print flag.
+            run_oculus_reader: start OculusReader's background thread at init
+                time. Set to False if you intend to manage the lifecycle
+                manually (e.g. for tests).
+            ip_address: if given, use network / WiFi mode. The Quest and the
+                PC must be on the same network. On first use OculusReader
+                will run `adb tcpip <port>` itself, so the USB cable must
+                still be plugged in at least once.
+            port: TCP port for adb network mode. Defaults to 5555.
+        """
         try:
             from oculus_reader.reader import OculusReader
         except ImportError as e:
@@ -130,6 +149,8 @@ class QuestStreamer:
             ) from e
 
         self._oculus_reader = OculusReader(
+            ip_address=ip_address,
+            port=port,
             print_FPS=print_fps,
             run=run_oculus_reader,
         )
