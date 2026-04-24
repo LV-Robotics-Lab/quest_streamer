@@ -20,6 +20,11 @@ dependencies = [
 [project.optional-dependencies]
 viser = ["viser>=0.1"]
 
+# `hand-tracking-sdk` is not declared here because it requires Python >=3.12
+# and we'd rather keep the base package installable on 3.10+. Install it
+# separately with `scripts/bootstrap_hand_tracking.sh` (mirrors how we handle
+# `oculus_reader`, which has its own LFS-apk quirks).
+
 [project.urls]
 Repository = "https://github.com/local/quest_streamer"
 

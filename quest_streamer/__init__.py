@@ -21,9 +21,17 @@ from quest_streamer.reader import QuestStreamer, HandFrame, RawFrame
 from quest_streamer.frames import X_WorldQuest, X_QuestWorld
 from quest_streamer.delta_tracker import DeltaPoseTracker, TrackerStep
 from quest_streamer.wrapper import QuestTeleop, TeleopSnapshot, HandState
+from quest_streamer.hand_tracking import (
+    HandTracker,
+    HandTrackingSnapshot,
+    TrackedHand,
+    X_WorldUnity,
+    X_UnityWorld,
+)
 from quest_streamer.utils import precise_wait
 
 __all__ = [
+    # Controller-based (oculus_reader) API
     "QuestStreamer",
     "HandFrame",
     "RawFrame",
@@ -34,6 +42,13 @@ __all__ = [
     "HandState",
     "X_WorldQuest",
     "X_QuestWorld",
+    # Hand-tracking (hand-tracking-sdk) API
+    "HandTracker",
+    "HandTrackingSnapshot",
+    "TrackedHand",
+    "X_WorldUnity",
+    "X_UnityWorld",
+    # Shared helpers
     "precise_wait",
 ]
 

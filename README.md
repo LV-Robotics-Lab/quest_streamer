@@ -1,12 +1,22 @@
 # quest_streamer
 
-`quest_streamer` is a small Python package that streams pose and button data
-from a Meta Quest / Oculus controller, so the data can be used as an input
-source for teleoperation, data collection, debugging, or visualization.
+`quest_streamer` is a Python package that streams both **controller** data
+(pose + buttons) and **bare-hand** data (21 finger joint positions per hand)
+from a Meta Quest headset, via two complementary Android-side APKs.
+
+## Two modes
+
+| Mode | What it gives you | Upstream APK | Upstream Python |
+|---|---|---|---|
+| **Controller** | 6-DoF pose of each Touch controller, trigger/grip/joystick, 6 discrete buttons per hand | `rail-berkeley/oculus_reader` | `oculus_reader` (ADB logcat) |
+| **Hand-tracking** | 6-DoF wrist pose + 21 finger-joint positions per bare hand | `wengmister/hand-tracking-streamer` | `hand-tracking-sdk` (TCP/UDP socket) |
+
+The two modes are fully independent and can be used side by side on the same
+headset (different APKs), though only one is typically active at a time.
 
 ## What you get
 
-Three API layers — pick the one that fits your integration:
+### Controller mode — three API layers
 
 - **`QuestTeleop` — high-level wrapper (recommended).** Spawns a background
   thread at a fixed rate, manages both hands with an internal
@@ -19,34 +29,56 @@ Three API layers — pick the one that fits your integration:
   [`oculus_reader`](https://github.com/rail-berkeley/oculus_reader). Exposes
   raw frames and a cleaner per-hand view (`HandFrame` / `RawFrame`).
 
-Also exported:
+### Hand-tracking mode
 
-- `X_WorldQuest` / `X_QuestWorld` — transform between the Quest's native
-  frame and a conventional Z-up world frame.
+- **`HandTracker` — high-level wrapper.** Spawns a background thread
+  consuming `hand_tracking_sdk.HTSClient`. Supports UDP, TCP-server, and
+  TCP-client transport. Exposes the same `snapshot()` / `on_update()` /
+  `wait_for_ready()` surface as `QuestTeleop`. Per-hand state includes the
+  wrist pose and 21 joint positions, in both native Unity-LH and Z-up FLU
+  world frames.
+
+### Shared
+
+- `X_WorldQuest` / `X_QuestWorld` — transform between the Quest's controller
+  native frame and a Z-up world frame.
+- `X_WorldUnity` / `X_UnityWorld` — transform between hand-tracking Unity-LH
+  and Z-up FLU world frames.
 - `precise_wait` — `time.monotonic`-based scheduler helper.
 
 ## Layout
 
 ```text
 quest_streamer/
-├── pyproject.toml             # project + uv config
-├── uv.lock                    # pinned dep graph, reproducible installs
+├── pyproject.toml                   # project + uv config
+├── uv.lock                          # pinned dep graph, reproducible installs
 ├── quest_streamer/
 │   ├── __init__.py
-│   ├── reader.py              # QuestStreamer, RawFrame, HandFrame
-│   ├── delta_tracker.py       # DeltaPoseTracker, TrackerStep
-│   ├── wrapper.py             # QuestTeleop, TeleopSnapshot, HandState
-│   ├── frames.py              # X_WorldQuest / X_QuestWorld
-│   └── utils.py               # precise_wait
+│   ├── reader.py                    # QuestStreamer, RawFrame, HandFrame
+│   ├── delta_tracker.py             # DeltaPoseTracker, TrackerStep
+│   ├── wrapper.py                   # QuestTeleop, TeleopSnapshot, HandState
+│   ├── hand_tracking.py             # HandTracker, HandTrackingSnapshot, TrackedHand
+│   ├── frames.py                    # X_WorldQuest / X_QuestWorld
+│   └── utils.py                     # precise_wait
 ├── examples/
-│   ├── print_raw_data.py      # connectivity sanity check
-│   ├── per_hand_stream.py     # cleaned up per-hand view
-│   ├── track_delta_pose.py    # trigger-engaged delta pose (single-hand)
-│   ├── teleop_wrapper.py      # full QuestTeleop demo: polling + callback
-│   ├── print_all_buttons.py   # prints every readable field per snapshot
-│   └── visualize_viser.py     # browser-based visualization
+│   # -- controller mode --
+│   ├── print_raw_data.py            # connectivity sanity check
+│   ├── per_hand_stream.py           # cleaned up per-hand view
+│   ├── track_delta_pose.py          # trigger-engaged delta pose (single-hand)
+│   ├── teleop_wrapper.py            # full QuestTeleop demo: polling + callback
+│   ├── print_all_buttons.py         # prints every readable field per snapshot
+│   ├── visualize_wrapper_viser.py   # viser viz of QuestTeleop
+│   ├── ros2_tf_broadcaster.py       # ROS 2 TF broadcaster for controllers
+│   ├── quest_viz.rviz               # rviz2 config for controller TFs
+│   │
+│   # -- hand-tracking mode --
+│   ├── hand_tracking_print.py       # text printout per hand per ~0.5s
+│   ├── hand_tracking_viser.py       # viser skeleton viz
+│   ├── ros2_hand_tracking_broadcaster.py  # ROS 2 TF + MarkerArray publisher
+│   └── quest_hand_tracking.rviz     # rviz2 config for hand-tracking
 └── scripts/
-    └── bootstrap_oculus_reader.sh  # installs oculus_reader + APK into venv
+    ├── bootstrap_oculus_reader.sh      # controller side: oculus_reader + APK
+    └── bootstrap_hand_tracking.sh      # hand-tracking side: SDK + APK
 ```
 
 ## Installation (uv-based, recommended)
@@ -132,6 +164,50 @@ uv run python examples/teleop_wrapper.py polling
 uv run python examples/print_all_buttons.py
 ```
 
+## Installation — hand-tracking mode
+
+Hand-tracking is a separate pipeline that uses a **different** APK
+(`wengmister/hand-tracking-streamer`) and a **different** Python SDK
+(`hand-tracking-sdk`). There's no overlap with `oculus_reader`, so you can
+install either or both. The hand-tracking APK streams joint data over a raw
+socket rather than through `adb logcat`.
+
+### 1. Bootstrap the SDK + APK
+
+```bash
+bash scripts/bootstrap_hand_tracking.sh
+```
+
+This `pip install`s `hand-tracking-sdk` into the active venv, clones
+`wengmister/hand-tracking-streamer`, and `adb install`s the APK onto the
+connected Quest. Set `SKIP_APK=1` to install the SDK only.
+
+`hand-tracking-sdk` requires Python ≥3.12, which is why it is installed via
+this bootstrap script rather than declared in `pyproject.toml` (that would
+force the base project's minimum Python up for everyone).
+
+### 2. On the headset
+
+Open the **hand-tracking-streamer** app from the Unknown Sources library,
+and configure its transport. The easiest mode for USB-connected development:
+
+- On the headset app: select **TCP server** (the APK acts as client), host
+  `127.0.0.1`, port `8000`.
+- On the PC: `adb reverse tcp:8000 tcp:8000` so the APK can reach the PC
+  through the USB tether.
+
+For wireless options see the upstream CONNECTIONS.md.
+
+### 3. Test it
+
+```bash
+uv run python examples/hand_tracking_print.py
+uv run python examples/hand_tracking_viser.py        # browser viz
+```
+
+With the headset on and both hands visible in front of you, you should see
+live wrist poses + 21 joint positions per hand stream in.
+
 ## Quick start
 
 ### Recommended: the high-level wrapper
@@ -209,6 +285,35 @@ with QuestStreamer() as streamer:
         X_WorldEE = step.X_WorldRef_next     # feed this to your robot / sim
         gripper = step.hand.grip             # route however you like
 ```
+
+### Hand-tracking quick start
+
+```python
+from quest_streamer import HandTracker
+
+with HandTracker(transport="tcp_server", host="0.0.0.0", port=8000) as ht:
+    ht.wait_for_ready(timeout=15.0)
+
+    while True:
+        snap = ht.snapshot()
+        if snap.r.connected:
+            wrist_pos = snap.r.wrist_world[:3, 3]         # (3,) in FLU meters
+            joints    = snap.r.landmarks_world             # (21, 3) in FLU
+            index_tip = snap.r.landmarks_world[8]          # IndexTip
+```
+
+`snap.l` / `snap.r` are `TrackedHand` instances with:
+
+- `wrist`, `wrist_world` — 4x4 SE(3); `wrist_world` is in the Z-up FLU frame.
+- `landmarks`, `landmarks_world` — `(21, 3)` arrays in the same joint order
+  as `hand_tracking_sdk.STREAMED_JOINT_NAMES` (Wrist, thumb×4, index×4,
+  middle×4, ring×4, little×4).
+- `connected`, `sequence_id`, `recv_ts_ns`, `source_ts_ns`,
+  `source_frame_seq`, `timestamp`.
+
+Transport options match the upstream SDK: `"tcp_server"` (PC listens; pairs
+with `adb reverse tcp:8000 tcp:8000` for USB), `"tcp_client"` (PC connects
+out, matches APK's TCP-client mode), `"udp"` (low-setup WiFi broadcast).
 
 ## Complete reference: what the wrapper exposes
 
