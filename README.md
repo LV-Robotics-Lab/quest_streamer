@@ -432,3 +432,42 @@ The rwVR repo also contained robot-specific glue (`XArmQuestAgent`,
 outside the scope of "Quest information acquisition" and are intentionally
 left in rwVR. If you want a full teleop loop, import `quest_streamer` from
 your own integration script and combine it with your robot / camera stack.
+
+## Known limitations
+
+### Head-pose stability
+
+Head, wrist, and landmark poses all come from the Quest's onboard
+Visual-Inertial Odometry (VIO, "Insight" tracking). Typical behavior:
+
+- **Single session, stationary user**: mm-level position noise, sub-degree
+  rotation noise.
+- **Single session, user walking**: mm – cm drift per minute depending on
+  lighting, scene texture, and how fast you move.
+- **Across sessions**: the tracking-space origin is re-anchored at each
+  boot / recenter. The `pose_world` origin is **not consistent across
+  restarts** of the headset or the companion app.
+- **Failure modes**: uniform white walls, dark rooms, heavy glare, or
+  motion faster than the cameras can track will cause pose to drift or
+  freeze. The APK keeps streaming the last pose while tracking is lost.
+
+For single-session teleop or a few minutes of demo capture this is usually
+fine. If you need **absolute, cross-session-stable world coordinates** or
+**sub-cm long-term drift correction**, two directions worth investigating:
+
+1. **PC-side AprilTag fusion.** The `hand-tracking-streamer` APK already
+   bundles a WebRTC video sender for the Quest passthrough cameras. You can
+   run an AprilTag detector on the PC, recover a known-tag world pose, and
+   fuse it with the streamed VIO pose to cancel drift. This keeps the rest
+   of the pipeline (hand joints etc.) unchanged.
+
+2. **Use `QuestNav` as a drop-in for head-only pose.** [QuestNav](https://questnav.gg/)
+   is a standalone Unity app that already does AprilTag + VIO fusion, with
+   sub-cm accuracy in FRC setups. Tradeoff: it replaces the
+   hand-tracking-streamer APK entirely (Quest runs one VR app at a time),
+   so you lose finger-joint tracking, and its output is NetworkTables 4
+   rather than a socket CSV — integrating it here would mean a third reader
+   implementation.
+
+We do neither today. If you hit one of the limitations above and want help
+adding a workaround, bring it up as an issue.
