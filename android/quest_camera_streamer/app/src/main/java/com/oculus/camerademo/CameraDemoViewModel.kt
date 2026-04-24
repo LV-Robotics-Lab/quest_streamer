@@ -366,6 +366,17 @@ class CameraStreamerViewModel(application: Application) : AndroidViewModel(appli
             logv("***** Camera ID ****** ${c.id}")
             logv("  width=${c.width} height=${c.height} pos=${c.position} passthrough=${c.isPassthrough}")
             logv("  lensTrans=${arrayToString(c.lensTranslation)} lensRot=${arrayToString(c.lensRotation)}")
+            try {
+                val ch = cameraManager.getCameraCharacteristics(c.id)
+                val intr = ch.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+                val dist = ch.get(CameraCharacteristics.LENS_DISTORTION)
+                val active = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                logv("  intrinsics=${arrayToString(intr)}  (fx, fy, cx, cy, s)")
+                logv("  distortion=${arrayToString(dist)}  (k1, k2, k3, k4, k5)")
+                logv("  activeArray=${active?.width()}x${active?.height()}")
+            } catch (e: Exception) {
+                logv("  (intrinsics unavailable: ${e.message})")
+            }
         }
     }
 

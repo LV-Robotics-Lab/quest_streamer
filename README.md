@@ -569,8 +569,92 @@ from quest_streamer import X_QuestWorld, X_WorldQuest
 X_world = X_QuestWorld @ X_quest @ X_WorldQuest
 ```
 
-## Head-pose stability
+## Drift-free localization via AprilTags
 
-If the head pose drifts unacceptably for your use case, consider swapping
-in [QuestNav](https://github.com/QuestNav/QuestNav), which fuses AprilTags
-with VIO for sub-cm, cross-session-stable head pose.
+`AprilTagLocalizer` consumes the `quest_camera_streamer` MJPEG feed, runs
+an AprilTag detector on each left-eye frame, and — when a tag with a known
+world pose is visible — recovers the camera's world-frame pose
+geometrically. No drift: every reading is an absolute measurement against
+the physical tag.
+
+### What you need
+
+1. **A printed AprilTag.** Default detector family is `tag36h11`. Generate
+   at e.g. <https://chev.me/arucogen/> (switch to "36h11"). Print *big*
+   — for 1280×960 input, a **16 cm** tag stays detectable up to ~2 m.
+2. **Install the two Python deps** (already implicit in our wrappers; only
+   the detector is extra):
+
+   ```bash
+   uv pip install pupil-apriltags opencv-python
+   ```
+3. **Run the camera APK** as usual (see "Installation — passthrough camera
+   mode"):
+
+   ```bash
+   scripts/switch_mode.sh camera
+   # headset: tap Start streaming in quest_camera_streamer
+   ```
+
+### Quick start
+
+```python
+import numpy as np
+from quest_streamer import (
+    CameraStreamer, AprilTagLocalizer, TagWorldPose, QUEST_3S_INTRINSICS,
+)
+
+# Tag placement in your world frame. Use np.eye(4) if the tag IS the origin.
+T_world_tag = np.eye(4)
+
+tags = {7: TagWorldPose(T_world_tag=T_world_tag, size_m=0.165)}
+
+with CameraStreamer() as cam, AprilTagLocalizer(
+    camera=cam,
+    tag_world_poses=tags,
+    intrinsics=QUEST_3S_INTRINSICS["l"],
+) as loc:
+    loc.wait_for_ready(timeout=15.0)
+    while True:
+        snap = loc.snapshot()
+        if snap.camera_pose_world is not None:
+            print(snap.camera_pose_world[:3, 3])     # meters, world frame
+            print(snap.head_pose_world[:3, 3])        # derived via head-cam extrinsic
+```
+
+### Examples
+
+```bash
+# text readout
+uv run python examples/apriltag_localizer_print.py --tag-id 7 --tag-size 0.165
+
+# 3D viser scene with trail
+uv run python examples/apriltag_localizer_viser.py --tag-id 7 --tag-size 0.165
+```
+
+### Known limits of this MVP
+
+- **Only works while a configured tag is in view.** When the tag leaves the
+  frame the last pose is held; `snap.last_detection_age` tells you how
+  stale it is. For real continuous localization (tag-gaps bridged by VIO)
+  we'd need the camera APK to also stream the Quest's live head pose,
+  which a plain Android app doesn't have access to today.
+- **Intrinsics are hardcoded for Quest 3S** from a single headset's dump
+  of `CameraCharacteristics.LENS_INTRINSIC_CALIBRATION`. Numbers differ
+  slightly per unit; use a proper checkerboard calibration for anything
+  better than cm-level accuracy.
+- **Only left eye is used by default.** `--eye r` switches to the right
+  camera with its own intrinsics and extrinsic.
+
+## Mode switcher
+
+Quest runs exactly one VR app at a time, so our three modes are mutually
+exclusive. `scripts/switch_mode.sh` stops whatever is running and launches
+the chosen one, plus sets up the right `adb forward` / `adb reverse`:
+
+```bash
+scripts/switch_mode.sh controller   # rail-berkeley/oculus_reader
+scripts/switch_mode.sh hands        # hand-tracking-streamer (adb reverse 8000)
+scripts/switch_mode.sh camera       # quest_camera_streamer (adb forward 9100)
+scripts/switch_mode.sh stop         # force-stop all + clear adb port maps
+```

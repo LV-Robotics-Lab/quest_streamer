@@ -30,6 +30,16 @@ from quest_streamer.hand_tracking import (
     X_UnityWorld,
 )
 from quest_streamer.camera import CameraStreamer, CameraFrame, CameraSnapshot
+from quest_streamer.apriltag_fusion import (
+    AprilTagLocalizer,
+    CameraIntrinsics,
+    LocalizerSnapshot,
+    TagDetection,
+    TagWorldPose,
+    QUEST_3S_INTRINSICS,
+    QUEST_3S_INTRINSICS_LEFT,
+    QUEST_3S_INTRINSICS_RIGHT,
+)
 from quest_streamer.utils import precise_wait
 
 __all__ = [
@@ -55,6 +65,15 @@ __all__ = [
     "CameraStreamer",
     "CameraFrame",
     "CameraSnapshot",
+    # AprilTag fusion
+    "AprilTagLocalizer",
+    "CameraIntrinsics",
+    "LocalizerSnapshot",
+    "TagDetection",
+    "TagWorldPose",
+    "QUEST_3S_INTRINSICS",
+    "QUEST_3S_INTRINSICS_LEFT",
+    "QUEST_3S_INTRINSICS_RIGHT",
     # Shared helpers
     "precise_wait",
 ]
