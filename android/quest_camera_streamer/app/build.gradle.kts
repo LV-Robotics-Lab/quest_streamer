@@ -8,9 +8,10 @@ plugins {
 android {
   namespace = "com.oculus.camerademo"
   compileSdk = 34
+  ndkVersion = "27.2.12479018"
 
   defaultConfig {
-    applicationId = "com.oculus.camerademo"
+    applicationId = "com.rail.oculus.teleop"
     minSdk = 34
     targetSdk = 34
     versionCode = 1
@@ -18,6 +19,15 @@ android {
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     vectorDrawables { useSupportLibrary = true }
+    externalNativeBuild {
+      cmake {
+        arguments += listOf("-DANDROID_STL=c++_static")
+        targets += "questtelemetry"
+      }
+    }
+    ndk {
+      abiFilters += "arm64-v8a"
+    }
   }
 
   buildTypes {
@@ -31,8 +41,17 @@ android {
     targetCompatibility = JavaVersion.VERSION_1_8
   }
   kotlinOptions { jvmTarget = "1.8" }
-  buildFeatures { compose = true }
+  buildFeatures {
+    compose = true
+    prefab = true
+  }
   composeOptions { kotlinCompilerExtensionVersion = "1.5.1" }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
+  }
   packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
 }
 
@@ -47,6 +66,7 @@ dependencies {
   implementation(libs.androidx.material3)
   implementation(libs.activity)
   implementation(libs.androidx.fragment.ktx)
+  implementation("org.khronos.openxr:openxr_loader_for_android:1.1.53")
   testImplementation(libs.junit)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.espresso.core)

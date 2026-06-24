@@ -55,6 +55,8 @@ env/
 # Android / Gradle build artifacts
 android/**/build/
 android/**/.gradle/
+android/**/.cxx/
 android/**/local.properties
 android/**/.idea/
 android/**/*.iml
+android/quest_camera_hand_streamer/work/

@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name" description="do not translate">quest_camera_streamer</string>
+    <string name="telemetry_app_name" description="do not translate">quest_streamer_telemetry</string>
 </resources>

@@ -2,19 +2,25 @@
 
 `quest_streamer` is a Python package that streams both **controller** data
 (pose + buttons) and **bare-hand** data (21 finger joint positions per hand)
-from a Meta Quest headset, via two complementary Android-side APKs.
+from a Meta Quest headset, via companion Android-side APKs.
 
-## Three modes
+## Four modes
 
 | Mode | What it gives you | Android side | PC-side Python |
 |---|---|---|---|
 | **Controller** | 6-DoF pose of each Touch controller, trigger/grip/joystick, 6 discrete buttons per hand | `rail-berkeley/oculus_reader` APK | `oculus_reader` (ADB logcat) |
 | **Hand-tracking** | 6-DoF wrist pose + 21 finger-joint positions per bare hand | `wengmister/hand-tracking-streamer` APK | `hand-tracking-sdk` (TCP/UDP socket) |
 | **Passthrough camera** | MJPEG stream from both forward RGB passthrough cameras (1280×960 per eye, ~37 Hz combined) | `android/quest_camera_streamer/` (in-repo, native Kotlin) | `CameraStreamer` (TCP socket) |
+| **Combined camera + controller + hand** | Camera2 passthrough MJPEG, Touch-controller pose/buttons, and bare-hand telemetry from one Quest APK | `android/quest_camera_streamer/` (Kotlin Camera2 activity + native OpenXR telemetry activity) | `CameraStreamer` + `QuestStreamer` / `QuestTeleop` + `HandTracker` |
 
 Each mode is independent. On Quest, only one VR application runs at a time,
 so the controller / hand-tracking / camera APKs are typically used one at a
-time. The PC-side wrappers can coexist freely in the same Python process.
+time. The combined APK is the exception: the in-repo Gradle app keeps the
+Camera2 streamer and adds a native OpenXR activity that emits controller
+frames in `oculus_reader`'s existing logcat format, streams bare-hand wrist
+and landmark packets on TCP 8000, and starts the camera TCP server on 9100 in
+the same package. The PC-side wrappers can coexist freely in the same Python
+process.
 
 ## What you get
 
@@ -67,8 +73,9 @@ quest_streamer/
 │   ├── oculus_teleop.apk            # controller-side companion app (vendored)
 │   └── hand_tracking_streamer.apk   # hand-tracking companion app (vendored)
 ├── android/
-│   └── quest_camera_streamer/       # Kotlin source for the passthrough-camera APK
-│                                    # Build with ./gradlew assembleDebug
+│   ├── quest_camera_streamer/       # Kotlin Camera2 + native OpenXR combined APK
+│   │                                # Build with ./gradlew assembleDebug
+│   └── quest_camera_hand_streamer/  # Legacy Unity overlay experiment
 ├── quest_streamer/
 │   ├── __init__.py
 │   ├── reader.py                    # QuestStreamer, RawFrame, HandFrame
@@ -100,7 +107,9 @@ quest_streamer/
 │   └── quest_hand_tracking.rviz     # rviz2 config for hand-tracking
 └── scripts/
     ├── bootstrap_oculus_reader.sh      # clones pinned oculus_reader, adb-installs assets/oculus_teleop.apk
-    └── bootstrap_hand_tracking.sh      # pip-installs hand-tracking-sdk, adb-installs assets/hand_tracking_streamer.apk
+    ├── bootstrap_hand_tracking.sh      # pip-installs hand-tracking-sdk, adb-installs assets/hand_tracking_streamer.apk
+    ├── verify_local_combined_apk.py    # static APK/source gate for the local Gradle APK
+    └── verify_combined_runtime.py      # runtime smoke test for camera + controller + hands
 ```
 
 ## Installation (uv-based, recommended)
@@ -267,9 +276,11 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 adb install -r -g app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Produces `com.oculus.camerademo` on the headset (same applicationId as the
-streamer APK; it displaces the Meta sample). The Kotlin source is under
-`android/quest_camera_streamer/app/src/main/java/com/oculus/camerademo/`.
+Produces `com.rail.oculus.teleop` on the headset. The Kotlin Camera2 UI still
+lives under `android/quest_camera_streamer/app/src/main/java/com/oculus/camerademo/`,
+and a native OpenXR telemetry activity is exposed through the
+`com.rail.oculus.teleop/.MainActivity` alias for compatibility with
+`oculus_reader`.
 
 ### 3. Wire + test
 
@@ -296,6 +307,96 @@ Gotchas, all hit during testing:
 - **Restart streaming after reinstalling the APK.** Newer APK → new process
   → old bound socket lingers in TIME_WAIT for a few seconds; first Start
   after install may EADDRINUSE. Second Start works.
+
+## Installation — combined camera + controller + hand mode
+
+The combined APK is the local Gradle project in
+`android/quest_camera_streamer/`. It contains:
+
+- the existing Kotlin Camera2 passthrough streamer on TCP 9100;
+- a native OpenXR VR activity that emits `rail-berkeley/oculus_reader`
+  compatible Touch controller pose/buttons over logcat using the same
+  `wE9ryARX` marker and parser format;
+- native `XR_EXT_hand_tracking` wrist + 21 landmark telemetry over TCP 8000,
+  matching the text packet shape used by
+  `wengmister/hand-tracking-streamer`.
+
+Prerequisites:
+
+- Android SDK/NDK and CMake configured for `android/quest_camera_streamer`.
+- Any Quest headset supported by the upstream hand-tracking app for controller
+  + bare-hand telemetry. The passthrough-camera stream still requires headset
+  camera support, currently Quest 3 / Quest 3S.
+- `adb` on PATH.
+
+Build and install. The combined APK uses package
+`com.rail.oculus.teleop`, so it replaces the standalone `oculus_reader`
+controller APK and remains compatible with the upstream `OculusReader.run()`
+hardcoded launch component.
+
+```bash
+cd android/quest_camera_streamer
+./gradlew assembleDebug
+adb install -r -g app/build/outputs/apk/debug/app-debug.apk
+```
+
+Static verification checks that the APK really contains the native OpenXR
+telemetry library, OpenXR loader, hand/camera permissions, activity alias, and
+source markers for the three telemetry paths:
+
+```bash
+python3 scripts/verify_local_combined_apk.py
+```
+
+Run it:
+
+```bash
+scripts/switch_mode.sh combined
+```
+
+The `combined` mode wires both ports and starts the native OpenXR activity:
+
+- controller telemetry: APK writes `oculus_reader`-compatible frames to logcat,
+  so existing `QuestStreamer` / `QuestTeleop` code can keep using ADB logcat.
+- hand telemetry: APK connects to the PC on TCP 8000, so the script sets
+  `adb reverse tcp:8000 tcp:8000`.
+- camera stream: APK listens on TCP 9100, so the script sets
+  `adb forward tcp:9100 tcp:9100`.
+
+On the PC you can consume all three streams in one Python process:
+
+```python
+from quest_streamer import CameraStreamer, HandTracker, QuestTeleop
+
+with QuestTeleop(frequency=60.0) as teleop, \
+     HandTracker(transport="tcp_server", host="0.0.0.0", port=8000) as hands, \
+     CameraStreamer(host="127.0.0.1", port=9100) as camera:
+    teleop.wait_for_ready(timeout=15)
+    hands.wait_for_ready(timeout=15)
+    camera.wait_for_ready(timeout=15)
+    ...
+```
+
+After installing the combined APK on a headset, this runtime smoke test checks
+the three required telemetry paths from the same package:
+
+```bash
+python3 scripts/verify_combined_runtime.py --install
+```
+
+It launches `com.rail.oculus.teleop`, waits for an `oculus_reader` logcat frame,
+listens on TCP 8000 for hand wrist + landmark telemetry, and connects to TCP
+9100 for a `QSTR` camera frame header.
+
+Generic Android emulators and browser/WebXR emulators can only exercise host
+protocol parsing; they do not provide Quest's OpenXR runtime, Touch controller
+actions, `XR_EXT_hand_tracking`, or Horizon passthrough camera permissions.
+Use a physical Quest for the runtime smoke test. For a headset-free protocol
+check of the three PC-facing wire formats, run:
+
+```bash
+python3 scripts/verify_simulated_protocols.py
+```
 
 ### 4. ROS 2 publishing (optional)
 
@@ -648,13 +749,16 @@ uv run python examples/apriltag_localizer_viser.py --tag-id 7 --tag-size 0.165
 
 ## Mode switcher
 
-Quest runs exactly one VR app at a time, so our three modes are mutually
-exclusive. `scripts/switch_mode.sh` stops whatever is running and launches
-the chosen one, plus sets up the right `adb forward` / `adb reverse`:
+Quest runs exactly one VR app at a time, so the standalone controller, hand,
+and camera apps are mutually exclusive. `combined` is a single VR app that
+runs controller telemetry and hand telemetry together. `scripts/switch_mode.sh`
+stops whatever is running and launches the chosen one, plus sets up the right
+`adb forward` / `adb reverse`:
 
 ```bash
 scripts/switch_mode.sh controller   # rail-berkeley/oculus_reader
 scripts/switch_mode.sh hands        # hand-tracking-streamer (adb reverse 8000)
 scripts/switch_mode.sh camera       # quest_camera_streamer (adb forward 9100)
+scripts/switch_mode.sh combined     # controller telemetry + hand telemetry in one APK
 scripts/switch_mode.sh stop         # force-stop all + clear adb port maps
 ```

@@ -4,6 +4,7 @@
 
 package com.oculus.camerademo
 
+import android.content.Intent
 import android.graphics.SurfaceTexture
 import android.os.Bundle
 import android.view.Surface
@@ -132,6 +133,9 @@ class MainActivity : ComponentActivity() {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { viewModel.startStreaming() }) { Text("Start streaming") }
                 Button(onClick = { viewModel.stopStreaming() }) { Text("Stop streaming") }
+                Button(onClick = { startActivity(Intent(this@MainActivity, TelemetryActivity::class.java)) }) {
+                    Text("Start XR telemetry")
+                }
                 Button(onClick = { viewModel.shutdown(); finish() }) { Text("Exit") }
             }
 

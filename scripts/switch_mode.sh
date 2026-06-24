@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Switch between the three Quest-side apps we support.
+# Switch between the Quest-side apps we support.
 #
-# Quest runs exactly one VR-ish app at a time, so using any of these three
+# Quest runs exactly one VR-ish app at a time, so using standalone apps
 # means the others are paused / torn down. This script just force-stops
 # whatever is running and launches the chosen one. It also sets up the
 # right `adb forward` / `adb reverse` port for each.
@@ -9,7 +9,8 @@
 # Usage:
 #     scripts/switch_mode.sh controller      # rail-berkeley/oculus_reader
 #     scripts/switch_mode.sh hands           # wengmister/hand-tracking-streamer
-#     scripts/switch_mode.sh camera          # in-repo quest_camera_streamer
+#     scripts/switch_mode.sh camera          # in-repo Camera2 streamer activity
+#     scripts/switch_mode.sh combined        # Camera2 + controller + hand tracking in one APK
 #     scripts/switch_mode.sh stop            # stop them all
 #
 # Assumes the APKs are already installed on the headset (run the respective
@@ -20,15 +21,17 @@ set -euo pipefail
 declare -A PKG
 PKG[controller]="com.rail.oculus.teleop"
 PKG[hands]="com.wengmister.handtrackingstreamer"
-PKG[camera]="com.oculus.camerademo"
+PKG[camera]="com.rail.oculus.teleop"
+PKG[combined]="com.rail.oculus.teleop"
 
 declare -A ACTIVITY
 ACTIVITY[controller]="com.rail.oculus.teleop/.MainActivity"
 ACTIVITY[hands]=""
-ACTIVITY[camera]="com.oculus.camerademo/.MainActivity"
+ACTIVITY[camera]="com.rail.oculus.teleop/com.oculus.camerademo.MainActivity"
+ACTIVITY[combined]="com.rail.oculus.teleop/.MainActivity"
 
 stop_all() {
-    for mode in controller hands camera; do
+    for mode in controller hands camera combined; do
         adb shell am force-stop "${PKG[$mode]}" >/dev/null 2>&1 || true
     done
     adb forward --remove-all >/dev/null 2>&1 || true
@@ -63,6 +66,16 @@ wire_ports() {
             adb forward tcp:9100 tcp:9100 >/dev/null
             echo "adb forward tcp:9100 tcp:9100  (PC -> APK)"
             ;;
+        combined)
+            # in-repo combined APK:
+            #   - controller data is emitted to logcat in oculus_reader format
+            #   - hand-tracking-streamer is still a TCP client to the PC on 8000
+            #   - embedded Camera2 streamer is a TCP server on the headset on 9100
+            adb reverse tcp:8000 tcp:8000 >/dev/null
+            adb forward tcp:9100 tcp:9100 >/dev/null
+            echo "adb reverse tcp:8000 tcp:8000  (combined APK -> PC)"
+            echo "adb forward tcp:9100 tcp:9100  (PC -> camera server in APK)"
+            ;;
     esac
 }
 
@@ -88,19 +101,20 @@ launch() {
 
 usage() {
     cat <<EOF
-Usage: $0 {controller|hands|camera|stop}
+Usage: $0 {controller|hands|camera|combined|stop}
 
   controller  launch com.rail.oculus.teleop                     (no port)
   hands       launch com.wengmister.handtrackingstreamer         (adb reverse 8000)
-  camera      launch com.oculus.camerademo (quest_camera_streamer) (adb forward 9100)
-  stop        force-stop all three and clear adb port mappings
+  camera      launch camera UI in com.rail.oculus.teleop           (adb forward 9100)
+  combined    launch com.rail.oculus.teleop                      (logcat + adb reverse 8000 + adb forward 9100)
+  stop        force-stop all supported apps and clear adb port mappings
 EOF
 }
 
 if [ $# -ne 1 ]; then usage; exit 2; fi
 
 case "$1" in
-    controller|hands|camera) launch "$1" ;;
+    controller|hands|camera|combined) launch "$1" ;;
     stop) stop_all ;;
     -h|--help|help) usage ;;
     *) usage; exit 2 ;;
