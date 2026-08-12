@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build a single Quest Unity APK that streams both:
+# Historical Unity-based combined-provider experiment. The formal controller
+# route is now the in-repo native OpenXR/TCP 9200 APK built with Gradle.
+# This script's controller output is diagnostic-only legacy logcat data:
 #   - Touch controller pose/buttons in rail-berkeley/oculus_reader logcat format
 #   - hand/wrist telemetry from wengmister/hand-tracking-streamer
 #   - optional passthrough camera MJPEG frames from the local Camera2 plugin
@@ -57,7 +59,7 @@ Prepared combined Unity project:
 
 The source tree now contains:
   - hand/wrist telemetry from wengmister/hand-tracking-streamer
-  - oculus_reader-compatible Touch controller telemetry
+  - diagnostic-only oculus_reader-compatible Touch controller telemetry
   - package/activity compatibility for com.rail.oculus.teleop
 
 Open this project in Unity 6000 with Android Build Support, or rerun without
@@ -93,7 +95,8 @@ fi
 cat <<EOF
 
 Combined mode wiring:
-  controller data uses adb logcat marker wE9ryARX (oculus_reader compatible)
+  controller data is diagnostic-only adb logcat marker wE9ryARX
+  formal controller mode uses the Gradle OpenXR/TCP 9200 APK instead
   adb reverse tcp:8000 tcp:8000   # hand telemetry: APK -> PC
   adb forward tcp:9100 tcp:9100   # optional camera stream: PC -> APK
 

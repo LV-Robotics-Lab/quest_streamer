@@ -7,7 +7,7 @@
 # right `adb forward` / `adb reverse` port for each.
 #
 # Usage:
-#     scripts/switch_mode.sh controller      # rail-berkeley/oculus_reader
+#     scripts/switch_mode.sh controller      # in-repo native OpenXR/TCP provider
 #     scripts/switch_mode.sh hands           # wengmister/hand-tracking-streamer
 #     scripts/switch_mode.sh camera          # in-repo Camera2 streamer activity
 #     scripts/switch_mode.sh combined        # Camera2 + controller + hand tracking in one APK
@@ -18,30 +18,59 @@
 
 set -euo pipefail
 
-declare -A PKG
-PKG[controller]="com.rail.oculus.teleop"
-PKG[hands]="com.wengmister.handtrackingstreamer"
-PKG[camera]="com.rail.oculus.teleop"
-PKG[combined]="com.rail.oculus.teleop"
+adb_bin="${QUEST_ADB_BIN:-}"
+if [ -z "$adb_bin" ]; then
+    adb_bin="$(command -v adb 2>/dev/null || true)"
+elif [[ "$adb_bin" != */* ]]; then
+    adb_bin="$(command -v "$adb_bin" 2>/dev/null || true)"
+fi
+if [ -z "$adb_bin" ] || [ ! -x "$adb_bin" ]; then
+    echo "ERROR: adb not found; set QUEST_ADB_BIN to one executable." >&2
+    exit 1
+fi
+export QUEST_ADB_BIN="$adb_bin"
 
-declare -A ACTIVITY
-ACTIVITY[controller]="com.rail.oculus.teleop/.MainActivity"
-ACTIVITY[hands]=""
-ACTIVITY[camera]="com.rail.oculus.teleop/com.oculus.camerademo.MainActivity"
-ACTIVITY[combined]="com.rail.oculus.teleop/.MainActivity"
+adb_cmd() {
+    "$adb_bin" "$@"
+}
+
+package_for_mode() {
+    case "$1" in
+        controller|camera|combined) echo "com.rail.oculus.teleop" ;;
+        hands) echo "com.wengmister.handtrackingstreamer" ;;
+        *) return 2 ;;
+    esac
+}
+
+activity_for_mode() {
+    case "$1" in
+        controller|combined) echo "com.rail.oculus.teleop/.MainActivity" ;;
+        camera) echo "com.rail.oculus.teleop/com.oculus.camerademo.MainActivity" ;;
+        hands) echo "" ;;
+        *) return 2 ;;
+    esac
+}
 
 stop_all() {
-    for mode in controller hands camera combined; do
-        adb shell am force-stop "${PKG[$mode]}" >/dev/null 2>&1 || true
+    local stop_mode
+    for stop_mode in controller hands camera combined; do
+        adb_cmd shell am force-stop "$(package_for_mode "$stop_mode")" \
+          >/dev/null 2>&1 || true
     done
-    adb forward --remove-all >/dev/null 2>&1 || true
-    adb reverse --remove-all >/dev/null 2>&1 || true
+    adb_cmd forward --remove-all >/dev/null 2>&1 || true
+    adb_cmd reverse --remove-all >/dev/null 2>&1 || true
     echo "stopped all quest_streamer apps; cleared adb forward/reverse"
 }
 
 check_installed() {
     local pkg="$1"
-    if ! adb shell pm list packages 2>/dev/null | grep -q "^package:$pkg$"; then
+    local packages
+    if ! packages="$(adb_cmd shell pm list packages 2>&1)"; then
+        echo "ERROR: adb package query failed using $adb_bin" >&2
+        echo "$packages" >&2
+        exit 1
+    fi
+    if ! grep -q "^package:$pkg$" <<<"$packages"; then
         echo "ERROR: $pkg is not installed on the Quest." >&2
         echo "Run the appropriate bootstrap script first." >&2
         exit 1
@@ -52,45 +81,62 @@ wire_ports() {
     local mode="$1"
     case "$mode" in
         controller)
-            # oculus_reader talks over adb logcat; no port forwarding.
+            # OpenXR controller frames use a dedicated device-side TCP server.
+            adb_cmd forward tcp:9200 tcp:9200 >/dev/null
+            echo "adb forward tcp:9200 tcp:9200  (PC -> OpenXR controller server)"
             ;;
         hands)
             # hand-tracking-streamer (APK is TCP client): APK connects to 127.0.0.1:8000
             # on-device, forwarded via adb reverse to PC's 8000.
-            adb reverse tcp:8000 tcp:8000 >/dev/null
+            adb_cmd reverse tcp:8000 tcp:8000 >/dev/null
             echo "adb reverse tcp:8000 tcp:8000  (APK -> PC)"
             ;;
         camera)
             # quest_camera_streamer (APK is TCP server): PC dials 127.0.0.1:9100,
             # forwarded via adb forward to headset's 9100.
-            adb forward tcp:9100 tcp:9100 >/dev/null
+            adb_cmd forward tcp:9100 tcp:9100 >/dev/null
             echo "adb forward tcp:9100 tcp:9100  (PC -> APK)"
             ;;
         combined)
             # in-repo combined APK:
-            #   - controller data is emitted to logcat in oculus_reader format
+            #   - controller data is served as strict JSONL on device TCP 9200
             #   - hand-tracking-streamer is still a TCP client to the PC on 8000
             #   - embedded Camera2 streamer is a TCP server on the headset on 9100
-            adb reverse tcp:8000 tcp:8000 >/dev/null
-            adb forward tcp:9100 tcp:9100 >/dev/null
+            adb_cmd reverse tcp:8000 tcp:8000 >/dev/null
+            adb_cmd forward tcp:9100 tcp:9100 >/dev/null
+            adb_cmd forward tcp:9200 tcp:9200 >/dev/null
             echo "adb reverse tcp:8000 tcp:8000  (combined APK -> PC)"
             echo "adb forward tcp:9100 tcp:9100  (PC -> camera server in APK)"
+            echo "adb forward tcp:9200 tcp:9200  (PC -> OpenXR controller server)"
             ;;
     esac
 }
 
 launch() {
     local mode="$1"
-    local pkg="${PKG[$mode]}"
-    local activity="${ACTIVITY[$mode]:-}"
+    local pkg
+    local activity
+    pkg="$(package_for_mode "$mode")"
+    activity="$(activity_for_mode "$mode")"
 
     check_installed "$pkg"
     stop_all >/dev/null
     wire_ports "$mode"
 
     if [ -n "$activity" ]; then
-        echo "launching $activity"
-        adb shell am start -n "$activity" >/dev/null 2>&1 || {
+      echo "launching $activity"
+      local -a start_args=(
+        shell am start -n "$activity"
+        -a android.intent.action.MAIN
+        -c android.intent.category.LAUNCHER
+      )
+      if [ "$mode" = "combined" ]; then
+        start_args+=(
+          --ez enable_camera true
+          --ez enable_hand_telemetry true
+        )
+      fi
+      adb_cmd "${start_args[@]}" >/dev/null 2>&1 || {
             echo "WARNING: am start returned non-zero; open the app manually from the headset's Unknown Sources library."
         }
     else
@@ -103,10 +149,10 @@ usage() {
     cat <<EOF
 Usage: $0 {controller|hands|camera|combined|stop}
 
-  controller  launch com.rail.oculus.teleop                     (no port)
+  controller  launch controller-only OpenXR telemetry            (adb forward 9200)
   hands       launch com.wengmister.handtrackingstreamer         (adb reverse 8000)
   camera      launch camera UI in com.rail.oculus.teleop           (adb forward 9100)
-  combined    launch com.rail.oculus.teleop                      (logcat + adb reverse 8000 + adb forward 9100)
+  combined    launch controller + optional hands/camera           (ports 8000/9100/9200)
   stop        force-stop all supported apps and clear adb port mappings
 EOF
 }

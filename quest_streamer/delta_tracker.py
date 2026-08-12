@@ -87,8 +87,20 @@ class DeltaPoseTracker:
             a `TrackerStep` otherwise.
         """
         hand = self._streamer.read_hand(self.which_hand, in_world_frame=False)
+        return self.step_frame(hand, X_WorldRef_current)
+
+    def step_frame(
+        self,
+        hand: Optional[HandFrame],
+        X_WorldRef_current: np.ndarray,
+    ) -> Optional[TrackerStep]:
+        """Advance from a hand frame captured by the caller's current tick."""
         if hand is None:
             return None
+        if hand.which_hand != self.which_hand:
+            raise ValueError(
+                f"tracker for {self.which_hand!r} received {hand.which_hand!r} frame"
+            )
 
         pressed = hand.trigger > self.trigger_threshold
 

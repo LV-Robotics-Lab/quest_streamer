@@ -87,6 +87,12 @@
             android:exported="true"
             android:label="@string/telemetry_app_name"
             android:targetActivity="com.oculus.camerademo.TelemetryActivity">
+            <!-- NativeActivity resolves metadata through the launched component.
+                 Keep the library name on the alias as well as its target or an
+                 alias launch falls back to looking for a nonexistent libmain.so. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="questtelemetry" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />

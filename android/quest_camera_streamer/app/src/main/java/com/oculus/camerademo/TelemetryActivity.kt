@@ -7,10 +7,14 @@ import android.widget.Toast
 
 class TelemetryActivity : NativeActivity() {
     private var cameraStreamer: CameraStreamerViewModel? = null
+    private var cameraTelemetryEnabled = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        startCameraStreamerWhenPermitted()
+        cameraTelemetryEnabled = intent.getBooleanExtra(ENABLE_CAMERA_EXTRA, false)
+        if (cameraTelemetryEnabled) {
+            startCameraStreamerWhenPermitted()
+        }
     }
 
     override fun onDestroy() {
@@ -25,7 +29,7 @@ class TelemetryActivity : NativeActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != CAMERA_PERMISSION_REQUEST) return
+        if (requestCode != CAMERA_PERMISSION_REQUEST || !cameraTelemetryEnabled) return
 
         val resultMap = permissions.zip(grantResults.toTypedArray()).associate {
             it.first to (it.second == PackageManager.PERMISSION_GRANTED)
@@ -54,5 +58,6 @@ class TelemetryActivity : NativeActivity() {
 
     private companion object {
         const val CAMERA_PERMISSION_REQUEST = 201
+        const val ENABLE_CAMERA_EXTRA = "enable_camera"
     }
 }

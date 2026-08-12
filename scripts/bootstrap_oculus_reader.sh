@@ -15,6 +15,7 @@
 #     QUEST_STREAMER_THIRD_PARTY=/path              # where to clone the repo
 #     OCULUS_READER_REV=<rev|HEAD>                  # upstream git revision
 #     SKIP_APK=1                                    # Python package only
+#     ALLOW_LEGACY_CONTROLLER_APK=1                 # diagnostic install only
 #
 # The upstream commit is pinned below for reproducibility; bump when needed.
 
@@ -73,6 +74,17 @@ if [ "${SKIP_APK:-0}" = "1" ]; then
     echo "[3/3] SKIP_APK=1, skipping APK install."
     echo "Done (Python only)."
     exit 0
+fi
+
+if [ "${ALLOW_LEGACY_CONTROLLER_APK:-0}" != "1" ]; then
+    cat >&2 <<EOF
+ERROR: refusing to install the vendored legacy controller APK.
+It does not export controller identity/tracking validity and is rejected by
+the live teleoperation gate. Build the patched provider described in
+docs/status/quest_provider_repair_report_20260721.md, or set
+ALLOW_LEGACY_CONTROLLER_APK=1 only for isolated diagnostics.
+EOF
+    exit 2
 fi
 
 if [ ! -f "$APK_PATH" ] || [ "$(stat -c '%s' "$APK_PATH")" -lt 100000 ]; then

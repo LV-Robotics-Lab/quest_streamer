@@ -2,11 +2,13 @@
 #include <GLES3/gl3.h>
 #include <android/log.h>
 #include <android_native_app_glue.h>
+#include <jni.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -16,6 +18,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -28,6 +31,9 @@
 namespace {
 
 constexpr const char* kControllerLogTag = "wE9ryARX";
+constexpr const char* kControllerSchema = "nero.quest_controller.raw.v1";
+constexpr const char* kTouchPlusExtension = "XR_META_touch_controller_plus";
+constexpr int kControllerPort = 9200;
 constexpr const char* kHandHost = "127.0.0.1";
 constexpr int kHandPort = 8000;
 constexpr int64_t kReconnectDelayNs = 1000LL * 1000LL * 1000LL;
@@ -182,6 +188,93 @@ private:
     }
 };
 
+class TcpControllerServer {
+public:
+    ~TcpControllerServer() {
+        shutdown();
+    }
+
+    bool start() {
+        if (listenFd_ >= 0) {
+            return true;
+        }
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            LOGE("controller socket failed: %s", strerror(errno));
+            return false;
+        }
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(kControllerPort);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+            ::listen(fd, 1) != 0) {
+            LOGE("controller server bind/listen failed on %d: %s", kControllerPort, strerror(errno));
+            close(fd);
+            return false;
+        }
+        const int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        listenFd_ = fd;
+        LOGI("OpenXR controller server listening on 127.0.0.1:%d", kControllerPort);
+        return true;
+    }
+
+    void sendLine(const std::string& payload) {
+        acceptClient();
+        if (clientFd_ < 0) {
+            return;
+        }
+        const std::string message = payload + "\n";
+        const ssize_t written = ::send(
+            clientFd_, message.data(), message.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (written < 0 || static_cast<size_t>(written) != message.size()) {
+            LOGW("controller TCP send failed or was partial: %s", strerror(errno));
+            closeClient();
+        }
+    }
+
+    void shutdown() {
+        closeClient();
+        if (listenFd_ >= 0) {
+            close(listenFd_);
+            listenFd_ = -1;
+        }
+    }
+
+private:
+    int listenFd_ = -1;
+    int clientFd_ = -1;
+
+    void acceptClient() {
+        if (clientFd_ >= 0 || listenFd_ < 0) {
+            return;
+        }
+        int fd = accept(listenFd_, nullptr, nullptr);
+        if (fd < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                LOGW("controller TCP accept failed: %s", strerror(errno));
+            }
+            return;
+        }
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        const int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        clientFd_ = fd;
+        LOGI("OpenXR controller TCP client connected");
+    }
+
+    void closeClient() {
+        if (clientFd_ >= 0) {
+            close(clientFd_);
+            clientFd_ = -1;
+        }
+    }
+};
+
 std::string fixed(float value, int precision = 6) {
     std::ostringstream ss;
     ss.setf(std::ios::fixed);
@@ -237,9 +330,78 @@ void appendMatrix(std::ostringstream& ss, const XrPosef& pose) {
     }
 }
 
+void appendMatrixJson(std::ostringstream& ss, const XrPosef& pose) {
+    std::ostringstream matrix;
+    appendMatrix(matrix, pose);
+    ss << '[';
+    std::istringstream values(matrix.str());
+    std::string value;
+    bool first = true;
+    while (values >> value) {
+        if (!first) {
+            ss << ',';
+        }
+        ss << value;
+        first = false;
+    }
+    ss << ']';
+}
+
+void appendJsonBool(std::ostringstream& ss, bool value) {
+    ss << (value ? "true" : "false");
+}
+
+bool booleanIntentExtra(android_app* app, const char* key, bool defaultValue) {
+    JavaVM* vm = app->activity->vm;
+    JNIEnv* env = nullptr;
+    bool detach = false;
+    const jint envStatus = vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (envStatus == JNI_EDETACHED) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            return defaultValue;
+        }
+        detach = true;
+    } else if (envStatus != JNI_OK || env == nullptr) {
+        return defaultValue;
+    }
+
+    bool result = defaultValue;
+    jobject activity = app->activity->clazz;
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID getIntent = env->GetMethodID(
+        activityClass, "getIntent", "()Landroid/content/Intent;");
+    jobject intent = getIntent == nullptr ? nullptr : env->CallObjectMethod(activity, getIntent);
+    if (intent != nullptr && !env->ExceptionCheck()) {
+        jclass intentClass = env->GetObjectClass(intent);
+        jmethodID getBooleanExtra = env->GetMethodID(
+            intentClass, "getBooleanExtra", "(Ljava/lang/String;Z)Z");
+        if (getBooleanExtra != nullptr) {
+            jstring extraKey = env->NewStringUTF(key);
+            result = env->CallBooleanMethod(
+                intent,
+                getBooleanExtra,
+                extraKey,
+                defaultValue ? JNI_TRUE : JNI_FALSE) == JNI_TRUE;
+            env->DeleteLocalRef(extraKey);
+        }
+        env->DeleteLocalRef(intentClass);
+        env->DeleteLocalRef(intent);
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        result = defaultValue;
+    }
+    env->DeleteLocalRef(activityClass);
+    if (detach) {
+        vm->DetachCurrentThread();
+    }
+    return result;
+}
+
 class QuestTelemetryApp {
 public:
-    explicit QuestTelemetryApp(android_app* app) : app_(app) {}
+    QuestTelemetryApp(android_app* app, bool enableHandTelemetry)
+        : app_(app), enableHandTelemetry_(enableHandTelemetry) {}
 
     bool init() {
         if (!initLoader()) {
@@ -257,6 +419,12 @@ public:
         if (!createSession()) {
             return false;
         }
+        if (!createPassthrough()) {
+            return false;
+        }
+        if (!controllerServer_.start()) {
+            return false;
+        }
         createSpaces();
         createActions();
         createHandTrackers();
@@ -265,6 +433,7 @@ public:
     }
 
     void shutdown() {
+        controllerServer_.shutdown();
         if (session_ != XR_NULL_HANDLE) {
             if (handTrackerLeft_ != XR_NULL_HANDLE && xrDestroyHandTrackerEXT_) {
                 xrDestroyHandTrackerEXT_(handTrackerLeft_);
@@ -280,13 +449,20 @@ public:
             if (localSpace_ != XR_NULL_HANDLE) {
                 xrDestroySpace(localSpace_);
             }
-            if (viewSpace_ != XR_NULL_HANDLE) {
-                xrDestroySpace(viewSpace_);
+            if (passthroughLayer_ != XR_NULL_HANDLE && xrDestroyPassthroughLayerFB_) {
+                xrDestroyPassthroughLayerFB_(passthroughLayer_);
+                passthroughLayer_ = XR_NULL_HANDLE;
+            }
+            if (passthrough_ != XR_NULL_HANDLE && xrDestroyPassthroughFB_) {
+                xrDestroyPassthroughFB_(passthrough_);
+                passthrough_ = XR_NULL_HANDLE;
             }
             xrDestroySession(session_);
+            session_ = XR_NULL_HANDLE;
         }
         if (instance_ != XR_NULL_HANDLE) {
             xrDestroyInstance(instance_);
+            instance_ = XR_NULL_HANDLE;
         }
         egl_.shutdown();
     }
@@ -317,6 +493,17 @@ public:
                            sessionState_ == XR_SESSION_STATE_LOSS_PENDING) {
                     app_->destroyRequested = 1;
                 }
+            } else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+                const auto* change =
+                    reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
+                if (change->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                    localSpaceChangePending_ = true;
+                    localSpaceChangeTime_ = change->changeTime;
+                    LOGI(
+                        "OpenXR LOCAL reference-space change pending time=%lld pose_valid=%d",
+                        static_cast<long long>(change->changeTime),
+                        change->poseValid == XR_TRUE ? 1 : 0);
+                }
             }
             event = {XR_TYPE_EVENT_DATA_BUFFER};
         }
@@ -331,15 +518,31 @@ public:
         XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         XR_CHECK(xrBeginFrame(session_, &beginInfo));
 
-        if (frameState.shouldRender) {
-            updateTelemetry(frameState.predictedDisplayTime);
+        if (localSpaceChangePending_ &&
+            (localSpaceChangeTime_ <= 0 ||
+             frameState.predictedDisplayTime >= localSpaceChangeTime_)) {
+            rotateProviderSession("local_reference_space_change");
+            localSpaceChangePending_ = false;
+            localSpaceChangeTime_ = 0;
         }
+
+        // shouldRender controls composition only. Input sampling must continue
+        // on every running frame so a compositor decision cannot silently
+        // stall the teleoperation source.
+        updateTelemetry(frameState.predictedDisplayTime);
+
+        XrCompositionLayerPassthroughFB passthroughComposition{
+            XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+        passthroughComposition.layerHandle = passthroughLayer_;
+        const XrCompositionLayerBaseHeader* layers[] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&passthroughComposition),
+        };
 
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
         endInfo.displayTime = frameState.predictedDisplayTime;
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        endInfo.layerCount = 0;
-        endInfo.layers = nullptr;
+        endInfo.layerCount = frameState.shouldRender ? 1u : 0u;
+        endInfo.layers = frameState.shouldRender ? layers : nullptr;
         XR_CHECK(xrEndFrame(session_, &endInfo));
     }
 
@@ -352,9 +555,14 @@ private:
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     bool sessionRunning_ = false;
     bool handTrackingEnabled_ = false;
+    bool touchPlusEnabled_ = false;
+    bool enableHandTelemetry_ = false;
+    int64_t providerSessionId_ = monotonicNs();
+    uint64_t controllerFrameSeq_ = 0;
+    bool localSpaceChangePending_ = false;
+    XrTime localSpaceChangeTime_ = 0;
 
     XrSpace localSpace_ = XR_NULL_HANDLE;
-    XrSpace viewSpace_ = XR_NULL_HANDLE;
 
     XrPath leftHandPath_ = XR_NULL_PATH;
     XrPath rightHandPath_ = XR_NULL_PATH;
@@ -375,6 +583,12 @@ private:
     std::vector<XrSpace> actionSpaces_;
 
     PFN_xrGetOpenGLESGraphicsRequirementsKHR xrGetOpenGLESGraphicsRequirementsKHR_ = nullptr;
+    PFN_xrCreatePassthroughFB xrCreatePassthroughFB_ = nullptr;
+    PFN_xrDestroyPassthroughFB xrDestroyPassthroughFB_ = nullptr;
+    PFN_xrCreatePassthroughLayerFB xrCreatePassthroughLayerFB_ = nullptr;
+    PFN_xrDestroyPassthroughLayerFB xrDestroyPassthroughLayerFB_ = nullptr;
+    XrPassthroughFB passthrough_ = XR_NULL_HANDLE;
+    XrPassthroughLayerFB passthroughLayer_ = XR_NULL_HANDLE;
     PFN_xrCreateHandTrackerEXT xrCreateHandTrackerEXT_ = nullptr;
     PFN_xrDestroyHandTrackerEXT xrDestroyHandTrackerEXT_ = nullptr;
     PFN_xrLocateHandJointsEXT xrLocateHandJointsEXT_ = nullptr;
@@ -384,6 +598,7 @@ private:
     std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> rightJoints_{};
 
     TcpHandSink handSink_;
+    TcpControllerServer controllerServer_;
 
     bool initLoader() {
         PFN_xrInitializeLoaderKHR initializeLoader = nullptr;
@@ -420,14 +635,25 @@ private:
             XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
             XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
         };
-        if (isExtensionAvailable(XR_EXT_HAND_TRACKING_EXTENSION_NAME)) {
-            extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
-            handTrackingEnabled_ = true;
-        } else {
-            LOGW("XR_EXT_hand_tracking is unavailable");
+        if (!isExtensionAvailable(XR_FB_PASSTHROUGH_EXTENSION_NAME)) {
+            LOGE("XR_FB_passthrough is unavailable; refusing to start a black immersive app");
+            return false;
         }
-        if (isExtensionAvailable("XR_META_simultaneous_hands_and_controllers")) {
-            extensions.push_back("XR_META_simultaneous_hands_and_controllers");
+        extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+        if (isExtensionAvailable(kTouchPlusExtension)) {
+            extensions.push_back(kTouchPlusExtension);
+            touchPlusEnabled_ = true;
+        }
+        if (enableHandTelemetry_) {
+            if (isExtensionAvailable(XR_EXT_HAND_TRACKING_EXTENSION_NAME)) {
+                extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+                handTrackingEnabled_ = true;
+            } else {
+                LOGW("XR_EXT_hand_tracking is unavailable");
+            }
+            if (isExtensionAvailable("XR_META_simultaneous_hands_and_controllers")) {
+                extensions.push_back("XR_META_simultaneous_hands_and_controllers");
+            }
         }
 
         XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
@@ -440,7 +666,9 @@ private:
         createInfo.applicationInfo.applicationVersion = 1;
         strcpy(createInfo.applicationInfo.engineName, "quest_streamer");
         createInfo.applicationInfo.engineVersion = 1;
-        createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+        // OpenXR 1.0 plus the Touch Plus extension covers Quest 3/3S while
+        // remaining compatible with runtimes that have not promoted it to 1.1.
+        createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.enabledExtensionNames = extensions.data();
 
@@ -457,7 +685,22 @@ private:
     bool createSystem() {
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
         systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-        return XR_CHECK(xrGetSystem(instance_, &systemInfo, &systemId_));
+        if (!XR_CHECK(xrGetSystem(instance_, &systemInfo, &systemId_))) {
+            return false;
+        }
+
+        XrSystemPassthroughPropertiesFB passthroughProperties{
+            XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES_FB};
+        XrSystemProperties systemProperties{XR_TYPE_SYSTEM_PROPERTIES};
+        systemProperties.next = &passthroughProperties;
+        if (!XR_CHECK(xrGetSystemProperties(instance_, systemId_, &systemProperties))) {
+            return false;
+        }
+        if (passthroughProperties.supportsPassthrough != XR_TRUE) {
+            LOGE("OpenXR system reports that passthrough is unsupported");
+            return false;
+        }
+        return true;
     }
 
     bool createSession() {
@@ -479,13 +722,64 @@ private:
         return XR_CHECK(xrCreateSession(instance_, &sessionInfo, &session_));
     }
 
+    bool createPassthrough() {
+        xrGetInstanceProcAddr(
+            instance_,
+            "xrCreatePassthroughFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrCreatePassthroughFB_));
+        xrGetInstanceProcAddr(
+            instance_,
+            "xrDestroyPassthroughFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyPassthroughFB_));
+        xrGetInstanceProcAddr(
+            instance_,
+            "xrCreatePassthroughLayerFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrCreatePassthroughLayerFB_));
+        xrGetInstanceProcAddr(
+            instance_,
+            "xrDestroyPassthroughLayerFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyPassthroughLayerFB_));
+        if (!xrCreatePassthroughFB_ || !xrDestroyPassthroughFB_ ||
+            !xrCreatePassthroughLayerFB_ || !xrDestroyPassthroughLayerFB_) {
+            LOGE("XR_FB_passthrough function pointers are unavailable");
+            return false;
+        }
+
+        XrPassthroughCreateInfoFB passthroughInfo{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+        passthroughInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+        if (!XR_CHECK(xrCreatePassthroughFB_(session_, &passthroughInfo, &passthrough_))) {
+            return false;
+        }
+
+        XrPassthroughLayerCreateInfoFB layerInfo{
+            XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+        layerInfo.passthrough = passthrough_;
+        layerInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+        layerInfo.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+        if (!XR_CHECK(
+                xrCreatePassthroughLayerFB_(session_, &layerInfo, &passthroughLayer_))) {
+            return false;
+        }
+        LOGI("OpenXR passthrough composition initialized");
+        return true;
+    }
+
     void createSpaces() {
         XrReferenceSpaceCreateInfo spaceInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
         spaceInfo.poseInReferenceSpace.orientation.w = 1.0f;
         spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
         XR_CHECK(xrCreateReferenceSpace(session_, &spaceInfo, &localSpace_));
-        spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-        XR_CHECK(xrCreateReferenceSpace(session_, &spaceInfo, &viewSpace_));
+    }
+
+    void rotateProviderSession(const char* reason) {
+        const int64_t previous = providerSessionId_;
+        providerSessionId_ = monotonicNs();
+        controllerFrameSeq_ = 0;
+        LOGI(
+            "OpenXR controller provider session rotated reason=%s old=%lld new=%lld",
+            reason,
+            static_cast<long long>(previous),
+            static_cast<long long>(providerSessionId_));
     }
 
     void createActions() {
@@ -599,9 +893,12 @@ private:
 
     void suggestBindings() {
         suggestForProfile("/interaction_profiles/oculus/touch_controller");
-        suggestForProfile("/interaction_profiles/meta/touch_controller_quest_2");
-        suggestForProfile("/interaction_profiles/meta/touch_pro_controller");
-        suggestForProfile("/interaction_profiles/meta/touch_plus_controller");
+        if (touchPlusEnabled_) {
+            // XR_META_touch_controller_plus is the OpenXR 1.0 extension. Its
+            // profile path predates the differently ordered OpenXR 1.1 core
+            // name (/meta/touch_plus_controller).
+            suggestForProfile("/interaction_profiles/meta/touch_controller_plus");
+        }
     }
 
     void createHandTrackers() {
@@ -644,6 +941,17 @@ private:
         return state.currentState == XR_TRUE;
     }
 
+    bool getPoseActive(XrPath hand) {
+        XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+        info.action = gripPoseAction_;
+        info.subactionPath = hand;
+        XrActionStatePose state{XR_TYPE_ACTION_STATE_POSE};
+        if (!XR_CHECK(xrGetActionStatePose(session_, &info, &state))) {
+            return false;
+        }
+        return state.isActive == XR_TRUE;
+    }
+
     float getFloat(XrAction action, XrPath hand) {
         XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
         info.action = action;
@@ -680,26 +988,28 @@ private:
     void emitControllerTelemetry(XrTime time) {
         XrSpaceLocation leftLocation{XR_TYPE_SPACE_LOCATION};
         XrSpaceLocation rightLocation{XR_TYPE_SPACE_LOCATION};
-        xrLocateSpace(leftGripSpace_, viewSpace_, time, &leftLocation);
-        xrLocateSpace(rightGripSpace_, viewSpace_, time, &rightLocation);
+        xrLocateSpace(leftGripSpace_, localSpace_, time, &leftLocation);
+        xrLocateSpace(rightGripSpace_, localSpace_, time, &rightLocation);
 
+        const bool leftActive = getPoseActive(leftHandPath_);
+        const bool rightActive = getPoseActive(rightHandPath_);
         const bool leftValid =
+            leftActive &&
             (leftLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
             (leftLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
         const bool rightValid =
+            rightActive &&
             (rightLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
             (rightLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
-        if (!leftValid && !rightValid) {
-            return;
-        }
 
+        // Keep the historical logcat surface for diagnostics during migration.
         std::ostringstream transforms;
         std::ostringstream buttons;
         bool first = true;
         if (leftValid) {
             transforms << "l:";
             appendMatrix(transforms, leftLocation.pose);
-            appendButtons(buttons, true);
+            appendButtons(buttons, true, leftActive, leftLocation.locationFlags);
             first = false;
         }
         if (rightValid) {
@@ -709,14 +1019,31 @@ private:
             }
             transforms << "r:";
             appendMatrix(transforms, rightLocation.pose);
-            appendButtons(buttons, false);
+            appendButtons(buttons, false, rightActive, rightLocation.locationFlags);
+        }
+        if (!first) {
+            const std::string payload = transforms.str() + "&" + buttons.str();
+            __android_log_print(ANDROID_LOG_INFO, kControllerLogTag, "%s", payload.c_str());
         }
 
-        const std::string payload = transforms.str() + "&" + buttons.str();
-        __android_log_print(ANDROID_LOG_INFO, kControllerLogTag, "%s", payload.c_str());
+        std::ostringstream json;
+        json << "{\"schema\":\"" << kControllerSchema
+             << "\",\"session_id\":\"" << providerSessionId_
+             << "\",\"frame_seq\":" << controllerFrameSeq_++
+             << ",\"sample_time_ns\":" << static_cast<int64_t>(time)
+             << ",\"reference_space\":\"local\",\"hands\":{";
+        appendControllerJson(json, true, leftActive, leftLocation);
+        json << ',';
+        appendControllerJson(json, false, rightActive, rightLocation);
+        json << "}}";
+        controllerServer_.sendLine(json.str());
     }
 
-    void appendButtons(std::ostringstream& ss, bool left) {
+    void appendButtons(
+        std::ostringstream& ss,
+        bool left,
+        bool active,
+        XrSpaceLocationFlags locationFlags) {
         XrPath hand = left ? leftHandPath_ : rightHandPath_;
         XrVector2f stick = getVec2(thumbstickAction_, hand);
         float trigger = getFloat(triggerValueAction_, hand);
@@ -744,6 +1071,67 @@ private:
             ss << "rightTrig " << fixed(trigger) << ",";
             ss << "rightGrip " << fixed(grip);
         }
+        const char* prefix = left ? "left" : "right";
+        ss << ',' << prefix << "PoseSource 1"
+           << ',' << prefix << "ControllerActive " << (active ? 1 : 0)
+           << ',' << prefix << "PositionValid "
+           << ((locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 ? 1 : 0)
+           << ',' << prefix << "OrientationValid "
+           << ((locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0 ? 1 : 0)
+           << ',' << prefix << "PositionTracked "
+           << ((locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0 ? 1 : 0)
+           << ',' << prefix << "OrientationTracked "
+           << ((locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0 ? 1 : 0);
+    }
+
+    void appendControllerJson(
+        std::ostringstream& ss,
+        bool left,
+        bool active,
+        const XrSpaceLocation& location) {
+        const char* side = left ? "left" : "right";
+        XrPath hand = left ? leftHandPath_ : rightHandPath_;
+        const bool positionValid =
+            (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+        const bool orientationValid =
+            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
+        const bool positionTracked =
+            (location.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+        const bool orientationTracked =
+            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
+        const XrVector2f stick = getVec2(thumbstickAction_, hand);
+        const float trigger = getFloat(triggerValueAction_, hand);
+        const float grip = getFloat(gripValueAction_, hand);
+
+        ss << '\"' << side << "\":{\"pose_source\":\"tracked_remote\""
+           << ",\"active\":";
+        appendJsonBool(ss, active);
+        ss << ",\"position_valid\":";
+        appendJsonBool(ss, positionValid);
+        ss << ",\"orientation_valid\":";
+        appendJsonBool(ss, orientationValid);
+        ss << ",\"position_tracked\":";
+        appendJsonBool(ss, positionTracked);
+        ss << ",\"orientation_tracked\":";
+        appendJsonBool(ss, orientationTracked);
+        ss << ",\"pose\":";
+        if (active && positionValid && orientationValid) {
+            appendMatrixJson(ss, location.pose);
+        } else {
+            ss << "null";
+        }
+        ss << ",\"trigger\":" << fixed(trigger)
+           << ",\"grip\":" << fixed(grip)
+           << ",\"joystick\":[" << fixed(stick.x) << ',' << fixed(stick.y)
+           << "],\"buttons\":{\"primary\":";
+        appendJsonBool(ss, left ? getBool(xButtonAction_) : getBool(aButtonAction_));
+        ss << ",\"secondary\":";
+        appendJsonBool(ss, left ? getBool(yButtonAction_) : getBool(bButtonAction_));
+        ss << ",\"thumb_rest\":";
+        appendJsonBool(ss, getBool(thumbrestTouchAction_, hand));
+        ss << ",\"stick\":";
+        appendJsonBool(ss, getBool(thumbstickClickAction_, hand));
+        ss << "}}";
     }
 
     void emitHandTelemetry(XrTime time) {
@@ -816,9 +1204,15 @@ void handleCmd(android_app*, int32_t) {}
 void android_main(android_app* app) {
     app->onAppCmd = handleCmd;
 
-    QuestTelemetryApp telemetry(app);
+    const bool enableHandTelemetry = booleanIntentExtra(
+        app, "enable_hand_telemetry", false);
+    LOGI("optional hand telemetry enabled=%d", enableHandTelemetry ? 1 : 0);
+    QuestTelemetryApp telemetry(app, enableHandTelemetry);
     if (!telemetry.init()) {
-        LOGE("Quest telemetry failed to initialize");
+        LOGE("Quest telemetry failed to initialize; returning to the system shell");
+        telemetry.shutdown();
+        ANativeActivity_finish(app->activity);
+        return;
     }
 
     while (!app->destroyRequested) {

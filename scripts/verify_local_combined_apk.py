@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Sequence
 
@@ -27,6 +28,9 @@ DEFAULT_APK = (
 DEFAULT_SOURCE_ROOT = REPO_ROOT / "android" / "quest_camera_streamer"
 PACKAGE = "com.rail.oculus.teleop"
 TELEMETRY_ALIAS = "com.rail.oculus.teleop.MainActivity"
+ANDROID_NS = "http://schemas.android.com/apk/res/android"
+ANDROID_NAME = f"{{{ANDROID_NS}}}name"
+ANDROID_VALUE = f"{{{ANDROID_NS}}}value"
 
 
 def read_text(path: Path) -> str:
@@ -74,11 +78,29 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def component_xmltree_block(xmltree: str, kind: str, component: str) -> str:
+    """Return one top-level application component from ``aapt xmltree``."""
+    lines = xmltree.splitlines()
+    marker = f"      E: {kind} "
+    for start, line in enumerate(lines):
+        if not line.startswith(marker):
+            continue
+        end = start + 1
+        while end < len(lines) and not lines[end].startswith("      E: "):
+            end += 1
+        block = "\n".join(lines[start:end])
+        if component in block:
+            return block
+    return ""
+
+
 def check_apk(apk: Path, aapt: str) -> None:
     require(apk.exists(), f"APK missing: {apk}")
 
     with zipfile.ZipFile(apk) as zf:
         names = set(zf.namelist())
+        native_path = "lib/arm64-v8a/libquesttelemetry.so"
+        native_telemetry = zf.read(native_path) if native_path in names else b""
     for name in (
         "lib/arm64-v8a/libquesttelemetry.so",
         "lib/arm64-v8a/libopenxr_loader.so",
@@ -103,6 +125,7 @@ def check_apk(apk: Path, aapt: str) -> None:
         "uses-permission: name='com.oculus.permission.HAND_TRACKING'",
         "uses-permission: name='org.khronos.openxr.permission.OPENXR'",
         "uses-feature: name='android.hardware.vr.headtracking'",
+        "uses-feature: name='com.oculus.feature.PASSTHROUGH'",
         "uses-feature-not-required: name='oculus.software.handtracking'",
     ):
         require(token in badging, f"aapt badging missing {token}")
@@ -117,6 +140,22 @@ def check_apk(apk: Path, aapt: str) -> None:
         "com.oculus.intent.category.VR",
     ):
         require(token in xmltree, f"merged manifest missing {token}")
+
+    alias_block = component_xmltree_block(
+        xmltree, "activity-alias", TELEMETRY_ALIAS
+    )
+    require(alias_block, f"merged manifest missing alias block {TELEMETRY_ALIAS}")
+    require(
+        "android.app.lib_name" in alias_block and "questtelemetry" in alias_block,
+        "telemetry activity alias must declare android.app.lib_name=questtelemetry",
+    )
+    for token in (
+        b"XR_FB_passthrough",
+        b"xrCreatePassthroughFB",
+        b"xrCreatePassthroughLayerFB",
+        b"OpenXR passthrough composition initialized",
+    ):
+        require(token in native_telemetry, f"native APK library missing {token!r}")
 
 
 def check_sources(source_root: Path) -> None:
@@ -133,20 +172,63 @@ def check_sources(source_root: Path) -> None:
         "XR_META_simultaneous_hands_and_controllers",
         "xrLocateHandJointsEXT",
         "XR_ACTION_TYPE_POSE_INPUT",
+        "xrGetActionStatePose",
+        "XR_FB_PASSTHROUGH_EXTENSION_NAME",
+        "XrSystemPassthroughPropertiesFB",
+        "XrCompositionLayerPassthroughFB",
+        "XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB",
+        "XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB",
+        "OpenXR passthrough composition initialized",
+        "ANativeActivity_finish(app->activity)",
+        "XR_SPACE_LOCATION_POSITION_TRACKED_BIT",
+        "XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT",
+        "XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING",
+        "XR_REFERENCE_SPACE_TYPE_LOCAL",
+        'rotateProviderSession("local_reference_space_change")',
+        '\\"reference_space\\":\\"local\\"',
         "kHandPort = 8000",
+        "kControllerPort = 9200",
+        "nero.quest_controller.raw.v1",
+        "controllerFrameSeq_",
+        "sample_time_ns",
         "leftJS",
         "rightGrip",
     ):
         require(token in cpp, f"native telemetry source missing {token}")
+    require(
+        "endInfo.layerCount = 0;" not in cpp,
+        "native telemetry must not unconditionally submit zero composition layers",
+    )
+    require(
+        "endInfo.layerCount = frameState.shouldRender ? 1u : 0u;" in cpp,
+        "native telemetry must submit passthrough whenever OpenXR requests rendering",
+    )
 
     for token in (
         "CameraStreamerViewModel(application)",
         "startStreaming()",
         "requestPermissions",
+        "enable_camera",
     ):
         require(token in telemetry_activity, f"TelemetryActivity missing {token}")
 
     require(TELEMETRY_ALIAS in manifest, f"manifest missing alias {TELEMETRY_ALIAS}")
+    root = ET.fromstring(manifest)
+    aliases = [
+        node
+        for node in root.findall("./application/activity-alias")
+        if node.get(ANDROID_NAME) == TELEMETRY_ALIAS
+    ]
+    require(len(aliases) == 1, f"manifest must contain one alias {TELEMETRY_ALIAS}")
+    alias_libraries = [
+        node.get(ANDROID_VALUE)
+        for node in aliases[0].findall("meta-data")
+        if node.get(ANDROID_NAME) == "android.app.lib_name"
+    ]
+    require(
+        alias_libraries == ["questtelemetry"],
+        "telemetry activity alias must bind NativeActivity to questtelemetry",
+    )
     require('applicationId = "com.rail.oculus.teleop"' in gradle, "Gradle package mismatch")
     require('abiFilters += "arm64-v8a"' in gradle, "Gradle ABI filter missing")
     require("openxr_loader_for_android" in gradle, "OpenXR loader dependency missing")

@@ -17,7 +17,17 @@ Typical usage:
         print(frame.pose, frame.trigger, frame.grip)
 """
 
-from quest_streamer.reader import QuestStreamer, HandFrame, RawFrame
+from quest_streamer.reader import QuestStreamer, HandFrame, RawFrame, hand_frame_from_raw
+from quest_streamer.controller_protocol import (
+    ControllerProtocolError,
+    OPENXR_CONTROLLER_SCHEMA,
+    parse_openxr_controller_packet,
+)
+from quest_streamer.controller_provider import (
+    ControllerProvider,
+    LegacyOculusReaderProvider,
+    OpenXRSocketControllerProvider,
+)
 from quest_streamer.frames import X_WorldQuest, X_QuestWorld
 from quest_streamer.delta_tracker import DeltaPoseTracker, TrackerStep
 from quest_streamer.wrapper import QuestTeleop, TeleopSnapshot, HandState
@@ -47,6 +57,13 @@ __all__ = [
     "QuestStreamer",
     "HandFrame",
     "RawFrame",
+    "ControllerProtocolError",
+    "OPENXR_CONTROLLER_SCHEMA",
+    "parse_openxr_controller_packet",
+    "ControllerProvider",
+    "LegacyOculusReaderProvider",
+    "OpenXRSocketControllerProvider",
+    "hand_frame_from_raw",
     "DeltaPoseTracker",
     "TrackerStep",
     "QuestTeleop",

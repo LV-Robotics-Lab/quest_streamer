@@ -8,19 +8,17 @@ from a Meta Quest headset, via companion Android-side APKs.
 
 | Mode | What it gives you | Android side | PC-side Python |
 |---|---|---|---|
-| **Controller** | 6-DoF pose of each Touch controller, trigger/grip/joystick, 6 discrete buttons per hand | `rail-berkeley/oculus_reader` APK | `oculus_reader` (ADB logcat) |
+| **Controller** | 6-DoF pose of each Touch controller, trigger/grip/joystick, 6 discrete buttons per hand | in-repo native OpenXR activity | strict JSONL over ADB-forwarded TCP 9200 |
 | **Hand-tracking** | 6-DoF wrist pose + 21 finger-joint positions per bare hand | `wengmister/hand-tracking-streamer` APK | `hand-tracking-sdk` (TCP/UDP socket) |
 | **Passthrough camera** | MJPEG stream from both forward RGB passthrough cameras (1280×960 per eye, ~37 Hz combined) | `android/quest_camera_streamer/` (in-repo, native Kotlin) | `CameraStreamer` (TCP socket) |
 | **Combined camera + controller + hand** | Camera2 passthrough MJPEG, Touch-controller pose/buttons, and bare-hand telemetry from one Quest APK | `android/quest_camera_streamer/` (Kotlin Camera2 activity + native OpenXR telemetry activity) | `CameraStreamer` + `QuestStreamer` / `QuestTeleop` + `HandTracker` |
 
-Each mode is independent. On Quest, only one VR application runs at a time,
-so the controller / hand-tracking / camera APKs are typically used one at a
-time. The combined APK is the exception: the in-repo Gradle app keeps the
-Camera2 streamer and adds a native OpenXR activity that emits controller
-frames in `oculus_reader`'s existing logcat format, streams bare-hand wrist
-and landmark packets on TCP 8000, and starts the camera TCP server on 9100 in
-the same package. The PC-side wrappers can coexist freely in the same Python
-process.
+The formal controller path is the in-repo Gradle APK plus the PC-side
+`OpenXRSocketControllerProvider`. `scripts/switch_mode.sh controller` launches
+only the native OpenXR controller source; camera and bare-hand telemetry remain
+off. `combined` explicitly enables those optional streams in the same APK.
+The old `oculus_reader` APK/logcat path remains available only as a named
+`legacy` diagnostic backend and is not the default teleoperation source.
 
 ## What you get
 
@@ -33,9 +31,10 @@ process.
   `wait_for_ready()` blocks until the headset actually produces data.
 - **`DeltaPoseTracker` — single-hand teleop primitive.** Trigger-engaged
   delta-pose state machine. Caller-pumped; reference frame can be anything.
-- **`QuestStreamer` — thin reader.** Wraps
-  [`oculus_reader`](https://github.com/rail-berkeley/oculus_reader). Exposes
-  raw frames and a cleaner per-hand view (`HandFrame` / `RawFrame`).
+- **`QuestStreamer` — provider-neutral reader.** Defaults to the strict OpenXR
+  TCP provider and exposes raw frames plus a cleaner per-hand view
+  (`HandFrame` / `RawFrame`). The legacy `oculus_reader` adapter must be
+  selected explicitly.
 
 ### Hand-tracking mode
 
@@ -78,6 +77,8 @@ quest_streamer/
 │   └── quest_camera_hand_streamer/  # Legacy Unity overlay experiment
 ├── quest_streamer/
 │   ├── __init__.py
+│   ├── controller_protocol.py       # strict versioned raw-controller JSON contract
+│   ├── controller_provider.py       # OpenXR TCP + diagnostic legacy adapters
 │   ├── reader.py                    # QuestStreamer, RawFrame, HandFrame
 │   ├── delta_tracker.py             # DeltaPoseTracker, TrackerStep
 │   ├── wrapper.py                   # QuestTeleop, TeleopSnapshot, HandState
@@ -137,9 +138,10 @@ For the optional `viser` visualization demo, add the extra:
 uv sync --extra viser
 ```
 
-### 3. Install `oculus_reader` into the venv
+### 3. Optional: install the legacy diagnostic backend
 
-`oculus_reader` is not on PyPI, so a bootstrap script clones a pinned commit
+The normal OpenXR/TCP path does not require `oculus_reader`. If a migration
+comparison is needed, `oculus_reader` is not on PyPI, so this bootstrap script clones a pinned commit
 of the upstream repo and pip-installs it into the active venv. The
 companion APK is vendored in `assets/oculus_teleop.apk` so no LFS fetch is
 needed at install time:
@@ -177,15 +179,23 @@ On the headset:
 3. Confirm detection: `adb devices` should show the Quest's serial as
    `device`, not `unauthorized` or `no permissions`.
 
-### 5. Push the companion APK to the headset
+### 5. Build the formal controller APK
 
-The bootstrap script already does this; to re-install manually:
+Use the in-repo OpenXR project. It targets API 34, NDK 27.2.12479018 and CMake
+3.22.1:
 
 ```bash
-adb install -r -g assets/oculus_teleop.apk
+cd android/quest_camera_streamer
+./gradlew assembleDebug
+python3 ../../scripts/verify_local_combined_apk.py \
+  --apk app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The Quest now runs `com.rail.oculus.teleop` whenever it is awake.
+The package name is intentionally still `com.rail.oculus.teleop`, so installing
+this APK replaces the legacy app instead of creating two competing VR sources.
+Installation is a separate, operator-approved device change. A signing-key
+mismatch may require uninstalling the old package first; preserve the pulled
+legacy APK and its hash as rollback evidence before doing so.
 
 ### 6. Test it
 
@@ -193,8 +203,24 @@ With the headset **worn** (or the proximity sensor covered, so the VR
 runtime stays awake) and controllers powered:
 
 ```bash
+adb forward tcp:9200 tcp:9200
+scripts/switch_mode.sh controller
 uv run python examples/teleop_wrapper.py polling
 uv run python examples/print_all_buttons.py
+```
+
+The protocol/provider and recovery helpers have an offline test suite:
+
+```bash
+uv run --extra dev pytest
+```
+
+After those checks pass, the input-only physical recovery gate can verify a
+provider restart and the required release-before-reengage behavior. It never
+sends robot commands:
+
+```bash
+uv run python scripts/verify_openxr_recovery.py
 ```
 
 ## Installation — hand-tracking mode
@@ -255,14 +281,15 @@ sudo apt install -y openjdk-17-jdk
 # Android SDK cmdline-tools (~150 MB download; ~1 GB after sdkmanager install)
 mkdir -p ~/Android/cmdline-tools
 cd /tmp && curl -fLsS -o cmdtools.zip \
-    https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+    https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip
 unzip -q cmdtools.zip
 mv cmdline-tools ~/Android/cmdline-tools/latest
 
 export ANDROID_HOME=$HOME/Android
 export PATH="$HOME/Android/cmdline-tools/latest/bin:$PATH"
 yes | sdkmanager --licenses
-sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" \
+  "ndk;27.2.12479018" "cmake;3.22.1"
 ```
 
 ### 2. Build + install the APK
@@ -314,9 +341,9 @@ The combined APK is the local Gradle project in
 `android/quest_camera_streamer/`. It contains:
 
 - the existing Kotlin Camera2 passthrough streamer on TCP 9100;
-- a native OpenXR VR activity that emits `rail-berkeley/oculus_reader`
-  compatible Touch controller pose/buttons over logcat using the same
-  `wE9ryARX` marker and parser format;
+- a native OpenXR VR activity that emits strict, versioned Touch-controller
+  frames on loopback TCP 9200; its old `wE9ryARX` logcat line is diagnostic
+  only;
 - native `XR_EXT_hand_tracking` wrist + 21 landmark telemetry over TCP 8000,
   matching the text packet shape used by
   `wengmister/hand-tracking-streamer`.
@@ -354,10 +381,11 @@ Run it:
 scripts/switch_mode.sh combined
 ```
 
-The `combined` mode wires both ports and starts the native OpenXR activity:
+The `combined` mode wires all three ports and starts the native OpenXR activity:
 
-- controller telemetry: APK writes `oculus_reader`-compatible frames to logcat,
-  so existing `QuestStreamer` / `QuestTeleop` code can keep using ADB logcat.
+- controller telemetry: APK listens on loopback TCP 9200 and the script sets
+  `adb forward tcp:9200 tcp:9200`; `QuestStreamer` / `QuestTeleop` use the
+  strict OpenXR provider by default.
 - hand telemetry: APK connects to the PC on TCP 8000, so the script sets
   `adb reverse tcp:8000 tcp:8000`.
 - camera stream: APK listens on TCP 9100, so the script sets
@@ -384,9 +412,10 @@ the three required telemetry paths from the same package:
 python3 scripts/verify_combined_runtime.py --install
 ```
 
-It launches `com.rail.oculus.teleop`, waits for an `oculus_reader` logcat frame,
-listens on TCP 8000 for hand wrist + landmark telemetry, and connects to TCP
-9100 for a `QSTR` camera frame header.
+It launches `com.rail.oculus.teleop`, strictly parses a TCP 9200 controller
+frame, listens on TCP 8000 for hand wrist + landmark telemetry, and connects
+to TCP 9100 for a `QSTR` camera frame header. Use
+`--controller-transport logcat` only for migration diagnostics.
 
 Generic Android emulators and browser/WebXR emulators can only exercise host
 protocol parsing; they do not provide Quest's OpenXR runtime, Touch controller
@@ -588,9 +617,10 @@ streaming**.
 
 ## Complete reference: what the wrapper exposes
 
-Everything below was verified on a physical Meta Quest 3S with real Touch
-controllers. `snap = teleop.snapshot()` returns a `TeleopSnapshot`; each hand
-is a `HandState`. The two hands are completely symmetric.
+`snap = teleop.snapshot()` returns a `TeleopSnapshot`; each hand is a
+`HandState`. The two hands are symmetric. The API surface has unit and APK
+build coverage; the new OpenXR/TCP runtime still requires the physical Quest
+gate described in `docs/runbooks/quest_openxr_controller.md`.
 
 ### `TeleopSnapshot`
 
@@ -598,9 +628,14 @@ is a `HandState`. The two hands are completely symmetric.
 |---|---|---|
 | `l` | `HandState` | left controller |
 | `r` | `HandState` | right controller |
-| `tick` | `int` | monotonically increasing bg-loop tick counter |
-| `fps` | `float` | measured bg-loop frequency over the last second |
-| `timestamp` | `float` | `time.monotonic()` when the snapshot was produced |
+| `tick` | `int` | provider frame sequence (legacy fallback: receive generation) |
+| `fps` | `float` | measured fresh-frame frequency over the last second |
+| `timestamp` | `float` | host monotonic receive time for this provider frame |
+| `provider_session_id` | `str` | changes when the Quest provider process restarts |
+| `source_frame_seq` | `int \| None` | source-owned monotonic sequence |
+| `source_sample_time_ns` | `int \| None` | provider clock; never compared directly with host time |
+| `receive_monotonic_ns` | `int` | host clock used for freshness and V1 age |
+| `source_stale` | `bool` | no newly received source frame within the configured timeout |
 
 ### `HandState` — pose fields
 
@@ -756,9 +791,9 @@ stops whatever is running and launches the chosen one, plus sets up the right
 `adb forward` / `adb reverse`:
 
 ```bash
-scripts/switch_mode.sh controller   # rail-berkeley/oculus_reader
+scripts/switch_mode.sh controller   # in-repo OpenXR, adb forward TCP 9200
 scripts/switch_mode.sh hands        # hand-tracking-streamer (adb reverse 8000)
 scripts/switch_mode.sh camera       # quest_camera_streamer (adb forward 9100)
-scripts/switch_mode.sh combined     # controller telemetry + hand telemetry in one APK
+scripts/switch_mode.sh combined     # OpenXR controller + hand + camera in one APK
 scripts/switch_mode.sh stop         # force-stop all + clear adb port maps
 ```

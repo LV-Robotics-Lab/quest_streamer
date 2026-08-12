@@ -78,6 +78,8 @@ def verify_controller_streamer(root: pathlib.Path) -> list[str]:
         "OVRInput.Controller.RTouch",
         "OVRInput.GetLocalControllerPosition",
         "OVRInput.GetLocalControllerRotation",
+        "OVRInput.GetControllerPositionTracked",
+        "OVRInput.GetControllerOrientationTracked",
         "Debug.Log",
         "AppendButtons",
         "rightJS",
@@ -86,6 +88,10 @@ def verify_controller_streamer(root: pathlib.Path) -> list[str]:
         "leftTrig",
         "rightGrip",
         "leftGrip",
+        "PoseSource 1",
+        "ControllerActive 1",
+        "PositionTracked ",
+        "OrientationTracked ",
     ]
     for needle in required:
         require_contains(text, needle, "controller streamer")

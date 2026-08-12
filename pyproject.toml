@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 viser = ["viser>=0.1"]
+dev = ["pytest>=7", "ruff>=0.5"]
 
 # `hand-tracking-sdk` is not declared here because it requires Python >=3.12
 # and we'd rather keep the base package installable on 3.10+. Install it
@@ -26,7 +27,7 @@ viser = ["viser>=0.1"]
 # `oculus_reader`, which has its own LFS-apk quirks).
 
 [project.urls]
-Repository = "https://github.com/local/quest_streamer"
+Repository = "https://github.com/LV-Robotics-Lab/quest_streamer"
 
 [build-system]
 requires = ["hatchling"]
@@ -50,5 +51,12 @@ packages = ["quest_streamer"]
 [tool.uv]
 # Keep build isolation on by default; set to `false` only if debugging.
 
-[dependency-groups]
-dev = ["pytest>=7", "ruff>=0.5"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I"]

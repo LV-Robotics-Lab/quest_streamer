@@ -65,6 +65,7 @@ public sealed class OculusReaderControllerStreamer : MonoBehaviour
         _transforms.Append(side).Append(':');
         AppendMatrix(_transforms, localFromHead);
         AppendButtons(_buttons, side);
+        AppendTracking(_buttons, side, controller);
     }
 
     private static Matrix4x4 ControllerPoseMatrix(OVRInput.Controller controller)
@@ -128,6 +129,21 @@ public sealed class OculusReaderControllerStreamer : MonoBehaviour
             AppendAxis1D(sb, "leftTrig", OVRInput.Get(OVRInput.RawAxis1D.LIndexTrigger));
             AppendAxis1D(sb, "leftGrip", OVRInput.Get(OVRInput.RawAxis1D.LHandTrigger), trailingComma: false);
         }
+    }
+
+    private static void AppendTracking(
+        StringBuilder sb,
+        char side,
+        OVRInput.Controller controller
+    )
+    {
+        string prefix = side == 'l' ? "left" : "right";
+        sb.Append(',').Append(prefix).Append("PoseSource 1")
+            .Append(',').Append(prefix).Append("ControllerActive 1")
+            .Append(',').Append(prefix).Append("PositionTracked ")
+            .Append(OVRInput.GetControllerPositionTracked(controller) ? '1' : '0')
+            .Append(',').Append(prefix).Append("OrientationTracked ")
+            .Append(OVRInput.GetControllerOrientationTracked(controller) ? '1' : '0');
     }
 
     private static void AppendIf(StringBuilder sb, bool enabled, string token)

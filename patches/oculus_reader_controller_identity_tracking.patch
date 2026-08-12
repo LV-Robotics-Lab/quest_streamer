@@ -1,0 +1,92 @@
+diff --git a/app_source/Src/OculusTeleop.cpp b/app_source/Src/OculusTeleop.cpp
+index a0cb52e..7bd036d 100644
+--- a/app_source/Src/OculusTeleop.cpp
++++ b/app_source/Src/OculusTeleop.cpp
+@@ -1214,7 +1214,13 @@ void ovrVrInputStandard::RenderRunningFrame(
+     BeamRenderer->RenderEyeView(out.FrameMatrices.CenterView, projectionMatrix, out.Surfaces);
+ 
+     int axisSurfaces = 0;
+-    std::vector<std::pair<char, OVR::Matrix4f>> handPoseTransformations;
++    struct ControllerTelemetry {
++        char Side;
++        OVR::Matrix4f Transform;
++        bool PositionTracked;
++        bool OrientationTracked;
++    };
++    std::vector<ControllerTelemetry> controllerTelemetry;
+ 
+ 
+     // add the controller model surfaces to the list of surfaces to render
+@@ -1224,9 +1230,8 @@ void ovrVrInputStandard::RenderRunningFrame(
+             assert(false); // this should never happen!
+             continue;
+         }
+-        if (device->GetType() != ovrControllerType_TrackedRemote &&
+-            device->GetType() != ovrControllerType_Hand &&
+-            device->GetType() != ovrControllerType_StandardPointer) {
++        // Controller mode must never alias hand or pointer devices onto l/r.
++        if (device->GetType() != ovrControllerType_TrackedRemote) {
+             continue;
+         }
+         if (!IsDeviceTypeEnabled(*device)) {
+@@ -1244,8 +1249,12 @@ void ovrVrInputStandard::RenderRunningFrame(
+         OVR::Matrix4f handPoseMatrixHeadCoord(Matrix4f::NoInit);
+         OVR::Matrix4f::Multiply(&handPoseMatrixHeadCoord,
+                                 headPoseMatrix.Inverted(), handPoseMatrix);
+-        handPoseTransformations.push_back(
+-            std::make_pair(side, handPoseMatrixHeadCoord));
++        controllerTelemetry.push_back({
++            side,
++            handPoseMatrixHeadCoord,
++            trDevice.IsPositionTracked(),
++            trDevice.IsOrientationTracked(),
++        });
+         TransformMatrices[axisSurfaces++] = handPoseMatrix;
+         TransformMatrices[axisSurfaces++] = matDeviceModel;
+         TransformMatrices[axisSurfaces++] = trDevice.GetPointerMatrix();
+@@ -1259,17 +1268,24 @@ void ovrVrInputStandard::RenderRunningFrame(
+     // send values
+     std::ostringstream output_ss, buttons_ss;
+     bool first = true;
+-    for (auto it = std::begin(handPoseTransformations);
+-         it != std::end(handPoseTransformations); ++it) {
++    for (auto it = std::begin(controllerTelemetry);
++         it != std::end(controllerTelemetry); ++it) {
+       if (!first) {
+         output_ss << '|';
+         buttons_ss << ",";
+       }
+-      char side = it->first;
+-      const OVR::Matrix4f &transformationMatrix = it->second;
++      char side = it->Side;
++      const OVR::Matrix4f &transformationMatrix = it->Transform;
+       output_ss << side << ":"
+                 << TransformationMatrixToString(transformationMatrix);
+       buttons_ss << Buttons->current_to_string(side);
++      const char* prefix = side == 'l' ? "left" : "right";
++      buttons_ss << "," << prefix << "PoseSource 1"
++                 << "," << prefix << "ControllerActive 1"
++                 << "," << prefix << "PositionTracked "
++                 << (it->PositionTracked ? 1 : 0)
++                 << "," << prefix << "OrientationTracked "
++                 << (it->OrientationTracked ? 1 : 0);
+       first = false;
+     }
+     output_ss << "&" << buttons_ss.str();
+diff --git a/app_source/Src/OculusTeleop.h b/app_source/Src/OculusTeleop.h
+index a7d7487..db9c826 100644
+--- a/app_source/Src/OculusTeleop.h
++++ b/app_source/Src/OculusTeleop.h
+@@ -136,6 +136,12 @@ namespace OVRFW {
+         void SetIsActiveInputDevice(bool isActive) {
+             IsActiveInputDevice = isActive;
+         }
++        bool IsPositionTracked() const {
++            return (Tracking.Status & VRAPI_TRACKING_STATUS_POSITION_TRACKED) != 0;
++        }
++        bool IsOrientationTracked() const {
++            return (Tracking.Status & VRAPI_TRACKING_STATUS_ORIENTATION_TRACKED) != 0;
++        }
+ 
+         virtual void
+         InitFromSkeletonAndMesh(ovrVrInputStandard& app, ovrHandSkeleton* skeleton, ovrHandMesh* mesh);
