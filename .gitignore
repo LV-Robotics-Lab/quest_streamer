@@ -60,3 +60,4 @@ android/**/local.properties
 android/**/.idea/
 android/**/*.iml
 android/quest_camera_hand_streamer/work/
+config/quest.env

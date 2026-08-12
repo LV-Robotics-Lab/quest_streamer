@@ -215,6 +215,9 @@ The protocol/provider and recovery helpers have an offline test suite:
 uv run --extra dev pytest
 ```
 
+Machine-specific provider settings can be copied from
+`config/quest.env.example`; keep the resulting `config/quest.env` local.
+
 After those checks pass, the input-only physical recovery gate can verify a
 provider restart and the required release-before-reengage behavior. It never
 sends robot commands:
