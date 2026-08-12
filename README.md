@@ -218,6 +218,16 @@ uv run --extra dev pytest
 Machine-specific provider settings can be copied from
 `config/quest.env.example`; keep the resulting `config/quest.env` local.
 
+Repository-owned host helpers replace the compatibility wrappers that used to
+live in the retired NERO/Quest integration repository:
+
+```bash
+bash scripts/setup_env.sh
+bash scripts/run_controller_smoke.sh
+bash scripts/connect_quest_wifi_adb.sh <quest-ip>
+bash scripts/quest_usb_debug_report.sh
+```
+
 After those checks pass, the input-only physical recovery gate can verify a
 provider restart and the required release-before-reengage behavior. It never
 sends robot commands:
