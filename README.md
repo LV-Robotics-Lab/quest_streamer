@@ -4,6 +4,11 @@
 (pose + buttons) and **bare-hand** data (21 finger joint positions per hand)
 from a Meta Quest headset, via companion Android-side APKs.
 
+| Field | Current status |
+| --- | --- |
+| Software integration status | The formal OpenXR provider and offline protocol test entry point are documented in this repository. They must still be rerun in the exact target environment for each deployment. |
+| On-site hardware acceptance status | No dated physical-headset acceptance is recorded here. Emulator checks do not exercise the Quest OpenXR runtime, Touch controllers, hand tracking, or passthrough permissions; a physical Quest runtime smoke test is still required. |
+
 ## Four modes
 
 | Mode | What it gives you | Android side | PC-side Python |
